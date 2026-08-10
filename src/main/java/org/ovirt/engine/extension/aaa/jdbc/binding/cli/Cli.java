@@ -1,0 +1,1840 @@
+package org.ovirt.engine.extension.aaa.jdbc.binding.cli;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+
+import java.io.BufferedReader;
+import java.io.File;
+import java.io.FileReader;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.InputStreamReader;
+import java.io.Reader;
+import java.io.StringReader;
+import java.io.BufferedReader;
+import java.lang.reflect.InvocationTargetException;
+import java.net.NetworkInterface;
+import java.nio.charset.Charset;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.security.GeneralSecurityException;
+import java.sql.SQLException;
+import java.text.ParseException;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Base64;
+import java.util.Calendar;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.Enumeration;
+import java.util.HashMap;
+import java.util.LinkedList;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Properties;
+import java.util.logging.ConsoleHandler;
+import java.util.logging.Handler;
+import java.util.logging.Level;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+import java.util.Set;
+
+import javax.sql.DataSource;
+
+import org.apache.commons.lang.StringUtils;
+import org.ovirt.engine.api.extensions.ExtKey;
+import org.ovirt.engine.api.extensions.ExtMap;
+import org.ovirt.engine.api.extensions.ExtUUID;
+import org.ovirt.engine.api.extensions.aaa.Authn;
+import org.ovirt.engine.api.extensions.aaa.Authz;
+import org.ovirt.engine.extension.aaa.jdbc.DateUtils;
+import org.ovirt.engine.extension.aaa.jdbc.Formatter;
+import org.ovirt.engine.extension.aaa.jdbc.Global;
+import org.ovirt.engine.extension.aaa.jdbc.binding.Config;
+import org.ovirt.engine.extension.aaa.jdbc.binding.api.ExtensionUtils;
+import org.ovirt.engine.extension.aaa.jdbc.binding.cli.command.Command;
+import org.ovirt.engine.extension.aaa.jdbc.binding.cli.command.GroupManageShowCommand;
+import org.ovirt.engine.extension.aaa.jdbc.core.Authentication;
+import org.ovirt.engine.extension.aaa.jdbc.core.Authorization;
+import org.ovirt.engine.extension.aaa.jdbc.core.EnvelopePBE;
+import org.ovirt.engine.extension.aaa.jdbc.core.Schema;
+import org.ovirt.engine.extension.aaa.jdbc.core.datasource.DataSourceProvider;
+import org.ovirt.engine.extension.aaa.jdbc.core.datasource.Sql;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import javax.crypto.Cipher;
+import javax.crypto.SecretKeyFactory;
+import javax.crypto.spec.IvParameterSpec;
+import javax.crypto.spec.PBEKeySpec;
+import javax.crypto.spec.SecretKeySpec;
+import javax.crypto.spec.GCMParameterSpec;
+
+import java.io.*;
+
+
+public class Cli {
+
+    private static final List<String> SENSISTIVE_DATA = new ArrayList<>();
+    static {
+        SENSISTIVE_DATA.add("config.datasource.dbpassword");
+    }
+
+    /** Exit Statuses */
+    public static final int SUCCESS = 0;
+    public static final int GENERAL_ERROR = 1;
+    public static final int ARGUMENT_PARSING_ERROR = 2;
+    public static final int SQL_ERROR = 3;
+    public static final int NOT_FOUND = 4;
+    public static final int ALREADY_EXISTS = 5;
+
+
+    /** Search */
+    private static final Map<String, ExtKey> cliNameToApiKey = new HashMap<>();
+
+    /**
+     * To print output:
+     */
+    private static final Map<ExtUUID, String> ENTITY_NAMES = new HashMap<>();
+
+    //Commands which are defined in their own class (meaning not statically here
+    //in Cli.java), may need to access this map.
+    public static Map<String, Command> getCommands() {
+        return commands;
+    }
+
+    private static final Logger LOG = LoggerFactory.getLogger(Cli.class);
+
+    private static final Map<String, Command> commands = new HashMap<>();
+
+    public static final ExtMap INSERT_DEFAULTS = new ExtMap().mput(
+        Schema.UserKeys.UNLOCK_TIME,
+        0L
+    ).mput(
+        Schema.UserKeys.SUCCESSFUL_LOGIN,
+        0L
+    ).mput(
+        Schema.UserKeys.UNSUCCESSFUL_LOGIN,
+        0L
+    ).mput(
+        Schema.UserKeys.PASSWORD_VALID_TO,
+        0L
+    ).mput(
+        Schema.UserKeys.NOPASS,
+        false
+    ).mput(
+        Schema.UserKeys.DISABLED,
+        false
+    );
+
+    static {
+        ENTITY_NAMES.put(Schema.Entities.USER, "user");
+        ENTITY_NAMES.put(Schema.Entities.GROUP, "group");
+        ENTITY_NAMES.put(Schema.Entities.SETTINGS, "setting");
+
+        cliNameToApiKey.put("g.name", Authz.GroupRecord.NAME);
+        cliNameToApiKey.put("g.id", Authz.GroupRecord.ID);
+        cliNameToApiKey.put("g.displayName", Authz.GroupRecord.DISPLAY_NAME);
+        cliNameToApiKey.put("g.description", Schema.AuthzInternal.GROUP_DESCRIPTION);
+        cliNameToApiKey.put("g.namespace", Authz.GroupRecord.NAMESPACE);
+
+        cliNameToApiKey.put("u.name", Authz.PrincipalRecord.NAME);
+        cliNameToApiKey.put("u.id", Authz.PrincipalRecord.ID);
+        cliNameToApiKey.put("u.displayName", Authz.PrincipalRecord.DISPLAY_NAME);
+        cliNameToApiKey.put("u.description", Schema.AuthzInternal.USER_DESCRIPTION);
+        cliNameToApiKey.put("u.namespace", Authz.PrincipalRecord.NAMESPACE);
+        cliNameToApiKey.put("u.email", Authz.PrincipalRecord.EMAIL);
+        cliNameToApiKey.put("u.firstName", Authz.PrincipalRecord.FIRST_NAME);
+        cliNameToApiKey.put("u.lastName", Authz.PrincipalRecord.LAST_NAME);
+        cliNameToApiKey.put("u.department", Authz.PrincipalRecord.DEPARTMENT);
+        cliNameToApiKey.put("u.title", Authz.PrincipalRecord.TITLE);
+
+        for (Command cmd: Arrays.asList(
+            new Command() {
+                @Override
+                public String getName() {
+                    return "root";
+                }
+
+                @Override
+                public List<String> getSubModules() {
+                    return Arrays.asList("user", "group", "group-manage", "query", "settings");
+                }
+
+                @Override
+                public void invoke(ExtMap context, Map<String, Object> args) {
+
+                    if (!context.containsKey(ContextKeys.EXIT_STATUS)) {
+                        setupLogging((Level) args.get("log-level"));
+                        context.put(ContextKeys.LOGGING_STARTED, true);
+                        LOG.trace("Logging started.");
+
+                        context.put(
+                            Schema.InvokeKeys.DATA_SOURCE,
+                            new DataSourceProvider(
+                                loadPropertiesFromFile((String) args.get("db-config"))
+                            ).provide()
+                        );
+
+                        // get settings
+                        context.put(Schema.InvokeKeys.ENTITY, Schema.Entities.SETTINGS);
+                        commands.get("_schema-get").invoke(context);
+                        context.remove(Schema.InvokeKeys.ENTITY);
+
+                        try {
+                            ExtensionUtils.checkDbVersion(
+                                context.<DataSource>get(Schema.InvokeKeys.DATA_SOURCE),
+                                (String) args.get("db-config")
+                            );
+                        } catch (SQLException | IOException e) {
+                            context.put(ContextKeys.EXIT_STATUS, GENERAL_ERROR);
+                            addContextMessage(context, true, e.getMessage());
+                            context.<List<Throwable>>get(ContextKeys.THROWABLES).add(e);
+                        }
+                    }
+                    if (!context.containsKey(ContextKeys.EXIT_STATUS) && (Boolean) args.get("version")) {
+                        System.out.print(
+                            Formatter.format(
+                                "package name: {}\nversion: {}\n",
+                                Config.PACKAGE_NAME,
+                                Config.PACKAGE_VERSION
+                            )
+                        );
+                        context.put(ContextKeys.EXIT_STATUS, SUCCESS);
+                    }
+                }
+            },
+            new Command() {
+                @Override
+                public String getName() {
+                    return "root-user";
+                }
+
+                @Override
+                public List<String> getSubModules() {
+                    return Arrays.asList("add", "edit", "delete", "unlock", "password-reset", "show");
+                }
+
+                @Override
+                public void invoke(ExtMap context, Map<String, Object> args) {
+                    context.mput(Schema.InvokeKeys.ENTITY, Schema.Entities.USER);
+                }
+            },
+            new Command() {
+                @Override
+                public String getName() {
+                    return "root-user-add";
+                }
+
+                @Override
+                public boolean entityNameExpected() {
+                    return true; // username expected
+                }
+
+                @Override
+                public void invoke(ExtMap context, Map<String, Object> args) {
+                    context.put(Schema.InvokeKeys.MODIFICATION_TYPE, Sql.ModificationTypes.INSERT);
+                    putUserAddKeys(context, args);
+                    if (!context.containsKey(ContextKeys.EXIT_STATUS)) {
+                        commands.get("_schema-modify").invoke(context);
+                    }
+
+                    if (!context.containsKey(ContextKeys.EXIT_STATUS)) {
+                        addContextMessage(context, false, Formatter.format(
+                            "Note: by default created user cannot log in. see:\n{} user password-reset --help.",
+                            System.getProperty("org.ovirt.engine.aaa.jdbc.programName")
+                        ));
+                        context.put(ContextKeys.EXIT_STATUS, SUCCESS);
+                    }
+                }
+            },
+            new Command() {
+                @Override
+                public String getName() {
+                    return "root-user-edit";
+                }
+
+                @Override
+                public boolean entityNameExpected() {
+                    return true; // username expected
+                }
+
+                @Override
+                public void invoke(ExtMap context, Map<String, Object> args) {
+
+                    context.mput(Schema.InvokeKeys.MODIFICATION_TYPE, Sql.ModificationTypes.UPDATE);
+                    putUserEditKeys(context, args);
+                    if (!context.containsKey(ContextKeys.EXIT_STATUS)) {
+                        commands.get("_schema-modify").invoke(context);
+                        context.putIfAbsent(ContextKeys.EXIT_STATUS, SUCCESS);
+                    }
+                }
+            },
+            new Command() {
+                @Override
+                public String getName() {
+                    return "root-user-delete";
+                }
+
+                @Override
+                public boolean entityNameExpected() {
+                    return true; // username expected
+                }
+
+                @Override
+                public void invoke(ExtMap context, Map<String, Object> args) {
+                    if (!context.containsKey(ContextKeys.EXIT_STATUS)) {
+                        context.put(Schema.InvokeKeys.MODIFICATION_TYPE, Sql.ModificationTypes.DELETE);
+                        context.put(Schema.InvokeKeys.ENTITY_KEYS, new ExtMap().mput(
+                            Schema.UserIdentifiers.USERNAME,
+                            context.<String>get(ContextKeys.POSITIONAL)
+                        ));
+
+                    }
+                    if (!context.containsKey(ContextKeys.EXIT_STATUS)) {
+                        commands.get("_schema-modify")
+                            .invoke(context);
+                        context.putIfAbsent(ContextKeys.EXIT_STATUS, SUCCESS);
+                    }
+                }
+            },
+            new Command() {
+                @Override
+                public String getName() {
+                    return "root-user-unlock";
+                }
+
+                @Override
+                public boolean entityNameExpected() {
+                    return true; // username expected
+                }
+
+                @Override
+                public void invoke(ExtMap context, Map<String, Object> args) {
+                    if (!context.containsKey(ContextKeys.EXIT_STATUS)) {
+                        context.put(Schema.InvokeKeys.MODIFICATION_TYPE, Sql.ModificationTypes.UPDATE);
+                        context.put(
+                            Schema.InvokeKeys.ENTITY_KEYS,
+                            new ExtMap().mput(
+                                Schema.UserIdentifiers.USERNAME,
+                                context.<String>get(ContextKeys.POSITIONAL)
+                            ).mput(Schema.UserKeys.UNLOCK_TIME, System.currentTimeMillis())
+                        );
+                        commands.get("_schema-modify").invoke(context);
+                        context.putIfAbsent(ContextKeys.EXIT_STATUS, SUCCESS);
+                    }
+                }
+            },
+            new Command() {
+                @Override
+                public String getName() {
+                    return "root-user-password-reset";
+                }
+
+                public boolean entityNameExpected() {
+                    return true; // username expected
+                }
+
+                @Override
+                public void invoke(ExtMap context, Map<String, Object> args) {
+                    try {
+                        String newPass = null;
+                        boolean nopass = false;
+                        boolean forcePassword = false;
+                        boolean encryptedPassword = false;
+                        context.put(Schema.InvokeKeys.MODIFICATION_TYPE, Sql.ModificationTypes.UPDATE);
+                        putUserResetPassParams(context, args);
+                        if (!context.containsKey(ContextKeys.EXIT_STATUS)) {
+                            newPass =
+                                context.get(Schema.InvokeKeys.ENTITY_KEYS, ExtMap.class)
+                                .get(Schema.UserKeys.PASSWORD, String.class);
+                            nopass =
+                                context.get(Schema.InvokeKeys.ENTITY_KEYS, ExtMap.class)
+                                .get(Schema.UserKeys.NOPASS, Boolean.class, false);
+                            forcePassword = context.get(Schema.InvokeKeys.ENTITY_KEYS, ExtMap.class)
+                                .get(Schema.UserKeys.FORCE_PASSWORD);
+                            encryptedPassword = (Boolean) args.get("encrypted");
+                        }
+                        Schema.User user = null;
+                        if (!context.containsKey(ContextKeys.EXIT_STATUS)) { // need to fetch user for pass history
+                            commands.get("_schema-get").invoke(context);
+                            user = context.get(Schema.InvokeKeys.USER_RESULT, Schema.User.class);
+                            if (user == null) {
+                                context.put(ContextKeys.EXIT_STATUS, NOT_FOUND);
+                                addContextMessage(context, true, Formatter.format("user {} not found",
+                                    context.<String>get(ContextKeys.POSITIONAL)
+                                ));
+                            }
+                        }
+                        if (encryptedPassword && !EnvelopePBE.isFormatCorrect(newPass)){
+                            context.put(ContextKeys.EXIT_STATUS, GENERAL_ERROR);
+                            addContextMessage(context, true, "Password is not correctly encrypted.");
+                        }
+                        if (!context.containsKey(ContextKeys.EXIT_STATUS) &&
+                            !nopass &&
+                            !forcePassword &&
+                            !encryptedPassword
+                        ) {
+                            // test pass history & complexity
+                            Authentication authentication =
+                                new Authentication(
+                                    context.get(
+                                        Schema.InvokeKeys.DATA_SOURCE,
+                                        DataSource.class
+                                    )
+                                );
+                            authentication.update(null, context.get(Schema.InvokeKeys.SETTINGS_RESULT, ExtMap.class));
+                            Authentication.AuthResponse authResponse =
+                                authentication.checkCredChange(
+                                    user,
+                                    newPass
+                                );
+                            if (authResponse.result != Authn.AuthResult.SUCCESS) {
+                                context.mput(ContextKeys.EXIT_STATUS, GENERAL_ERROR);
+                                addContextMessage(context, true, authResponse.baseMsg);
+                            }
+                        }
+                        if (!context.containsKey(ContextKeys.EXIT_STATUS)) {
+                            ExtMap settings = context.get(Schema.InvokeKeys.SETTINGS_RESULT, ExtMap.class);
+                            context.get(Schema.InvokeKeys.ENTITY_KEYS, ExtMap.class)
+                            .mput(
+                                Schema.UserKeys.PASSWORD,
+                                (newPass == null || encryptedPassword) ?
+                                newPass :
+                                EnvelopePBE.encode(
+                                    settings.get(Schema.Settings.PBE_ALGORITHM, String.class),
+                                    settings.get(Schema.Settings.PBE_KEY_SIZE, Integer.class),
+                                    settings.get(Schema.Settings.PBE_ITERATIONS, Integer.class),
+                                    null,
+                                    newPass
+                                )
+                            ).mput(
+                                Schema.UserKeys.OLD_PASSWORD,
+                                user.getPassword()
+                            );
+                            commands.get("_schema-modify").invoke(context);
+                            context.putIfAbsent(ContextKeys.EXIT_STATUS, SUCCESS);
+                        }
+                    } catch (IOException | GeneralSecurityException e) {
+                        context.put(ContextKeys.EXIT_STATUS, GENERAL_ERROR);
+                        addContextMessage(context, true, e.getMessage());
+                        context.<List<Throwable>>get(ContextKeys.THROWABLES).add(e);
+                    }
+                }
+            },
+            new Command() {
+                @Override
+                public String getName() {
+                    return "root-user-show";
+                }
+
+                public boolean entityNameExpected() {
+                    return true; // username expected
+                }
+
+                @Override
+                public void invoke(ExtMap context, Map<String, Object> args) {
+                    if (args.containsKey("attribute")) {
+                        context.put(
+                            ContextKeys.SHOW_TEMPLATE,
+                            String.format(
+                                "user-%s",
+                                args.get("attribute")
+                            )
+                        );
+                    }
+                    context.put(
+                        ContextKeys.SEARCH_FILTER,
+                        Formatter.format("{} = {}",
+                            Schema.SEARCH_KEYS.get(Authz.PrincipalRecord.NAME),
+                            Formatter.escapeString(context.get(ContextKeys.POSITIONAL, String.class))
+                        )
+                    );
+                    context.mput(Global.InvokeKeys.SEARCH_CONTEXT,
+                     new ExtMap().mput(Global.SearchContext.PAGE_SIZE, 1)
+                     .mput(Global.SearchContext.IS_PRINCIPAL, true)
+                     .mput(Global.SearchContext.RECURSIVE, false)
+                     .mput(Global.SearchContext.WITH_GROUPS, true)
+                     .mput(Global.SearchContext.ALL_ATTRIBUTES, true)
+                    );
+
+                    commands.get("_search").invoke(context);
+                    if (
+                        context.get(ContextKeys.SEARCH_RESULT, Collection.class) == null ||
+                        context.get(ContextKeys.SEARCH_RESULT, Collection.class).size() == 0
+                    ) {
+                        addContextMessage(context, true, Formatter.format(
+                            "user {} not found",
+                            context.<String>get(ContextKeys.POSITIONAL)
+                        ));
+                        context.put(ContextKeys.EXIT_STATUS, NOT_FOUND);
+                    }
+
+
+                    if (!context.containsKey(ContextKeys.EXIT_STATUS)) {
+                        commands.get("_show")
+                            .invoke(context);
+                    }
+                }
+            },
+            new Command() {
+                @Override
+                public String getName() {
+                    return "root-group";
+                }
+
+                @Override
+                public List<String> getSubModules() {
+                    return Arrays.asList("add", "edit", "delete", "show");
+                }
+
+
+                @Override
+                public void invoke(ExtMap context, Map<String, Object> args) {
+                    context.mput(Schema.InvokeKeys.ENTITY, Schema.Entities.GROUP);
+                }
+            },
+            new Command() {
+                @Override
+                public String getName() {
+                    return "root-group-add";
+                }
+
+                public boolean entityNameExpected() {
+                    return true; // group name expected
+                }
+
+
+                @Override
+                public void invoke(ExtMap context, Map<String, Object> args) {
+                    context.mput(Schema.InvokeKeys.MODIFICATION_TYPE, Sql.ModificationTypes.INSERT);
+                    context.put(Schema.InvokeKeys.ENTITY_KEYS,
+                                getGroupKeys(args, context.get(ContextKeys.POSITIONAL, String.class))
+                    );
+
+                    if (!context.containsKey(ContextKeys.EXIT_STATUS)) {
+                        commands.get("_schema-modify").invoke(context);
+                        context.putIfAbsent(ContextKeys.EXIT_STATUS, SUCCESS);
+                    }
+                }
+            },
+            new Command() {
+                @Override
+                public String getName() {
+                    return "root-group-edit";
+                }
+
+                public boolean entityNameExpected() {
+                    return true; // group name expected
+                }
+
+                @Override
+                public void invoke(ExtMap context, Map<String, Object> args) {
+                    context.mput(Schema.InvokeKeys.MODIFICATION_TYPE, Sql.ModificationTypes.UPDATE);
+                    context.put(Schema.InvokeKeys.ENTITY_KEYS, getGroupKeys(args, context.get(ContextKeys.POSITIONAL, String.class)));
+
+                    if (!context.containsKey(ContextKeys.EXIT_STATUS)) {
+                        commands.get("_schema-modify")
+                            .invoke(context);
+                        context.putIfAbsent(ContextKeys.EXIT_STATUS, SUCCESS);
+                    }
+                }
+            },
+            new Command() {
+                @Override
+                public String getName() {
+                    return "root-group-delete";
+                }
+
+                public boolean entityNameExpected() {
+                    return true; // group name expected
+                }
+
+                @Override
+                public void invoke(ExtMap context, Map<String, Object> args) {
+                    context.put(Schema.InvokeKeys.MODIFICATION_TYPE, Sql.ModificationTypes.DELETE);
+                    context.put(Schema.InvokeKeys.ENTITY_KEYS,
+                                new ExtMap().mput(
+                                    Schema.GroupIdentifiers.NAME,
+                                    context.<String>get(ContextKeys.POSITIONAL)
+                                )
+                    );
+                    commands.get("_schema-modify").invoke(context);
+                    context.putIfAbsent(ContextKeys.EXIT_STATUS, SUCCESS);
+                }
+            },
+            new Command() {
+                @Override
+                public String getName() {
+                    return "root-group-show";
+                }
+
+                public boolean entityNameExpected() {
+                    return true; // username expected
+                }
+
+                @Override
+                public void invoke(ExtMap context, Map<String, Object> args) {
+                    getGroup(context);
+                    if (!context.containsKey(ContextKeys.EXIT_STATUS)) {
+                        commands.get("_show").invoke(context);
+                    }
+                }
+            },
+            new Command() {
+                @Override
+                public String getName() {
+                    return "root-group-manage";
+                }
+
+                @Override
+                public List<String> getSubModules() {
+                    return Arrays.asList("useradd", "userdel", "groupadd", "groupdel", "show");
+                }
+
+                @Override
+                public void invoke(ExtMap context, Map<String, Object> args) {
+                    context.mput(Schema.InvokeKeys.MODIFICATION_TYPE, Sql.ModificationTypes.UPDATE);
+                }
+            },
+            new Command() {
+                @Override
+                public String getName() {
+                    return "root-group-manage-useradd";
+                }
+
+                @Override
+                public boolean entityNameExpected() {
+                    return true; // username expected
+                }
+
+                @Override
+                public void invoke(ExtMap context, Map<String, Object> args) {
+                    context.mput(Schema.InvokeKeys.ENTITY, Schema.Entities.USER)
+                    .mput(
+                        Schema.InvokeKeys.ENTITY_KEYS,
+                        new ExtMap().mput(Schema.UserIdentifiers.USERNAME, args.get("user"))
+                            .mput(Schema.SharedKeys.ADD_GROUP, context.<String>get(ContextKeys.POSITIONAL))
+                    );
+                    commands.get("_schema-modify").invoke(context);
+                    context.putIfAbsent(ContextKeys.EXIT_STATUS, SUCCESS);
+                }
+            },
+            new Command() {
+                @Override
+                public String getName() {
+                    return "root-group-manage-userdel";
+                }
+
+                public boolean entityNameExpected() {
+                    return true; // username expected
+                }
+
+                @Override
+                public void invoke(ExtMap context, Map<String, Object> args) {
+                    context.mput(Schema.InvokeKeys.ENTITY, Schema.Entities.USER)
+                        .mput(
+                            Schema.InvokeKeys.ENTITY_KEYS,
+                            new ExtMap().mput(Schema.UserIdentifiers.USERNAME, args.get("user"))
+                                .mput(Schema.SharedKeys.REMOVE_GROUP, context.<String>get(ContextKeys.POSITIONAL))
+                        );
+                    commands.get("_schema-modify").invoke(context);
+                    context.putIfAbsent(ContextKeys.EXIT_STATUS, SUCCESS);
+                }
+            },
+            new Command() {
+                @Override
+                public String getName() {
+                    return "root-group-manage-groupadd";
+                }
+
+                @Override
+                public boolean entityNameExpected() {
+                    return true; // username expected
+                }
+
+                @Override
+                public void invoke(ExtMap context, Map<String, Object> args) {
+                    context.mput(Schema.InvokeKeys.ENTITY, Schema.Entities.GROUP)
+                        .mput(
+                            Schema.InvokeKeys.ENTITY_KEYS,
+                            new ExtMap().mput(Schema.GroupIdentifiers.NAME, args.get("group"))
+                                .mput(Schema.SharedKeys.ADD_GROUP, context.<String>get(ContextKeys.POSITIONAL))
+                        );
+
+                    commands.get("_schema-modify")
+                        .invoke(context);
+                    context.putIfAbsent(ContextKeys.EXIT_STATUS, SUCCESS);
+                }
+            },
+            new Command() {
+                @Override
+                public String getName() {
+                    return "root-group-manage-groupdel";
+                }
+
+                public boolean entityNameExpected() {
+                    return true; // username expected
+                }
+
+                @Override
+                public void invoke(ExtMap context, Map<String, Object> args) {
+                    context.mput(Schema.InvokeKeys.ENTITY, Schema.Entities.GROUP)
+                        .mput(
+                            Schema.InvokeKeys.ENTITY_KEYS,
+                            new ExtMap().mput(Schema.GroupIdentifiers.NAME, args.get("group"))
+                                .mput(Schema.SharedKeys.REMOVE_GROUP, context.<String>get(ContextKeys.POSITIONAL))
+                        );
+                    commands.get("_schema-modify")
+                        .invoke(context);
+                    context.putIfAbsent(ContextKeys.EXIT_STATUS, SUCCESS);
+
+                }
+            },
+            new GroupManageShowCommand(),
+            new Command() {
+                @Override
+                public String getName() {
+                    return "root-settings";
+                }
+
+                @Override
+                public List<String> getSubModules() {
+                    return Arrays.asList("show", "set");
+                }
+
+                @Override
+                public void invoke(ExtMap context, Map<String, Object> args) {
+                    context.mput(Schema.InvokeKeys.ENTITY, Schema.Entities.SETTINGS);
+                }
+            },
+            new Command() {
+                @Override
+                public String getName() {
+                    return "root-settings-show";
+                }
+
+                @Override
+                public void invoke(ExtMap context, Map<String, Object> args) {
+                    ExtMap settings = context.get(Schema.InvokeKeys.SETTINGS_RESULT, ExtMap.class);
+                    ExtMap descriptions = (ExtMap) settings.remove(Schema.Settings.SETTING_DESCRIPTIONS);
+                    for (Map.Entry<ExtKey, Object> entry : settings.entrySet()) {
+                        if (
+                            ((String) args.get("name")).toUpperCase().equals("ALL") ||
+                            ((String) args.get("name")).toUpperCase().equals(entry.getKey().getUuid().getName())
+                        ) {
+                            System.out.print(
+                                Formatter.format("-- setting --\nname: {}\nvalue: {}\ntype: {}\ndescription: {}\n",
+                                    entry.getKey().getUuid().getName(),
+                                    entry.getValue(),
+                                    entry.getKey().getType(),
+                                    descriptions.get(entry.getKey())
+                                )
+                            );
+                        }
+                    }
+                }
+            },
+            new Command() {
+                @Override
+                public String getName() {
+                    return "root-settings-set";
+                }
+
+                @Override
+                public void invoke(ExtMap context, Map<String, Object> args) {
+                    context.mput(Schema.InvokeKeys.MODIFICATION_TYPE, Sql.ModificationTypes.UPDATE);
+                    ExtMap settings = context.get(Schema.InvokeKeys.SETTINGS_RESULT, ExtMap.class);
+                    for (Map.Entry<ExtKey, Object> entry : settings.entrySet()) {
+                        ExtKey key = entry.getKey();
+                        if (((String) args.get("name")).toUpperCase()
+                            .equals(key.getUuid().getName())) {
+                            try {
+                                context.mput(Schema.InvokeKeys.ENTITY_KEYS,
+                                     new ExtMap().mput(
+                                         key,
+                                         key.getType().getConstructor(String.class)
+                                         .newInstance((String) args.get("value"))
+                                     )
+                                );
+                            } catch (NoSuchMethodException | InvocationTargetException | InstantiationException | IllegalAccessException e) {
+                                throw new RuntimeException(
+                                    Formatter.format(
+                                        "Could not convert setting to expected type. value: {} type: {}",
+                                        args.get("value"),
+                                        key.getType()
+                                    ),
+                                    e
+                                );
+                            }
+                            commands.get("_schema-modify").invoke(context);
+                        }
+                    }
+
+                }
+            },
+            new Command() {
+                @Override
+                public String getName() {
+                    return "root-query";
+                }
+
+                @Override
+                public void invoke(ExtMap context, Map<String, Object> args) {
+                    String what = (String) args.get("what");
+                    boolean isPrincipal = what.toUpperCase().equals("USER");
+
+                    @SuppressWarnings("unchecked")
+                    List<String> filterPatterns = (List<String>) args.get("pattern");
+                    filterPatterns = (filterPatterns != null ? filterPatterns : Collections.<String>emptyList());
+                    StringBuilder filter = new StringBuilder("true AND ");
+                    for (String filterPattern : filterPatterns) {
+                        String val = filterPattern.split("=", 2)[1];
+                        val=val.replace('*', '%');
+                        filter.append(
+                            Schema.SEARCH_KEYS.get(
+                                cliNameToApiKey.get(
+                                    (isPrincipal ? "u." : "g.") + filterPattern.split("=", 2)[0]
+                                )
+                            )
+                        ).append(" ").append(Schema.OPERATORS.get(Schema.AuthzInternal.LIKE)).append(" ")
+                        .append(Formatter.escapeString(val)).append(" AND ");
+                    }
+                    filter.setLength(filter.length() - 5);
+                    context.mput(
+                        ContextKeys.SEARCH_FILTER,
+                        filter.toString()
+                    ).mput(
+                        Global.InvokeKeys.SEARCH_CONTEXT,
+                        new ExtMap().mput(Global.SearchContext.PAGE_SIZE, 100)
+                        .mput(Global.SearchContext.IS_PRINCIPAL, isPrincipal)
+                        .mput(Global.SearchContext.RECURSIVE, false)
+                        .mput(Global.SearchContext.WITH_GROUPS, true)
+                        .mput(Global.SearchContext.ALL_ATTRIBUTES, true)
+                    );
+
+                    commands.get("_search").invoke(context);
+
+                    if (!context.containsKey(ContextKeys.EXIT_STATUS)) {
+                        commands.get("_show").invoke(context);
+                    }
+                }
+            },
+            /**
+             * Following are internal methods that cannot be invoked from command line.
+             */
+            new Command() {
+                @Override
+                public String getName() {
+                    return "_schema-get";
+                }
+
+                @SuppressWarnings("unchecked")
+                @Override
+                public void invoke(ExtMap context, Map<String, Object> args) {
+                    try {
+                        context.putAll(
+                            Schema.get(
+                                new ExtMap().mput(Schema.InvokeKeys.DATA_SOURCE, context.get(Schema.InvokeKeys.DATA_SOURCE))
+                                .mput(Schema.InvokeKeys.ENTITY, context.get(Schema.InvokeKeys.ENTITY))
+                                .mput(Schema.InvokeKeys.ENTITY_KEYS, context.get(Schema.InvokeKeys.ENTITY_KEYS))
+                                .mput(Schema.InvokeKeys.SETTINGS_RESULT, context.get(Schema.InvokeKeys.SETTINGS_RESULT))
+                                .mput(Schema.InvokeKeys.USER_RESULT, context.get(Schema.InvokeKeys.USER_RESULT))
+                            )
+                        );
+                    } catch (SQLException e) {
+                        context.put(ContextKeys.EXIT_STATUS, SQL_ERROR);
+                        addContextMessage(context, true, e.getMessage());
+
+                        context.<List<Throwable>>get(ContextKeys.THROWABLES).add(e);
+                    }
+                }
+            },
+            new Command() {
+                @Override
+                public String getName() {
+                    return "_schema-modify";
+                }
+
+                @SuppressWarnings("unchecked")
+                @Override
+                public void invoke(ExtMap context, Map<String, Object> args) {
+                    try {
+                        Integer modType = context.get(Schema.InvokeKeys.MODIFICATION_TYPE, Integer.class);
+                        String modName = "add";
+                        if (modType == Sql.ModificationTypes.DELETE) {
+                            modName = "delet";
+                        } else if (modType == Sql.ModificationTypes.UPDATE) {
+                            modName = "updat";
+                        }
+                        System.out.print(
+                            Formatter.format(
+                                "{}ing {} {}...\n",
+                                modName,
+                                ENTITY_NAMES.get(context.get(Schema.InvokeKeys.ENTITY, ExtUUID.class)),
+                                context.<String>get(ContextKeys.POSITIONAL) != null ? // settings have no name
+                                context.<String>get(ContextKeys.POSITIONAL) :
+                                ""
+                            ));
+                        ExtMap modification =
+                            new ExtMap().mput(Schema.InvokeKeys.ENTITY, context.get(Schema.InvokeKeys.ENTITY))
+                            .mput(Schema.InvokeKeys.ENTITY_KEYS, context.get(Schema.InvokeKeys.ENTITY_KEYS))
+                            .mput(Schema.InvokeKeys.USER_RESULT, context.get(Schema.InvokeKeys.USER_RESULT))
+                            .mput(Schema.InvokeKeys.MODIFICATION_TYPE, modType) // removing
+                            .mput(Schema.InvokeKeys.DATA_SOURCE, context.get(Schema.InvokeKeys.DATA_SOURCE));
+                        LOG.trace(Formatter.format("executing modification: {}", modification));
+                        Schema.modify(modification);
+                        System.out.print(
+                            Formatter.format(
+                                "{} {}ed successfully\n",
+                                ENTITY_NAMES.get(context.get(Schema.InvokeKeys.ENTITY, ExtUUID.class)),
+                                modName
+                            )
+                        );
+                    } catch (Schema.EntityNotFoundException e) {
+                        addContextMessage(context, true, e.getMessage());
+                        context.<List<Throwable>>get(ContextKeys.THROWABLES).add(e);
+                        context.put(ContextKeys.EXIT_STATUS, NOT_FOUND);
+                    } catch (Schema.EntityAlreadyExists e) {
+                        addContextMessage(context, true, e.getMessage());
+                        context.<List<Throwable>>get(ContextKeys.THROWABLES).add(e);
+                        context.put(ContextKeys.EXIT_STATUS, ALREADY_EXISTS);
+                    } catch (SQLException e) {
+                        addContextMessage(context, true, e.getMessage());
+                        context.<List<Throwable>>get(ContextKeys.THROWABLES).add(e);
+                        context.put(ContextKeys.EXIT_STATUS, SQL_ERROR);
+                    }
+                }
+            },
+            new Command() {
+                @Override
+                public String getName() {
+                    return "_search";
+                }
+
+
+                @SuppressWarnings("unchecked")
+                @Override
+                public  void invoke(ExtMap context, Map<String, Object> args) {
+                    Collection<ExtMap> res = null;
+                    try {
+                        Authorization authorization = new Authorization(context.get(Schema.InvokeKeys.DATA_SOURCE, DataSource.class));
+                        authorization.update(null, context.get(Schema.InvokeKeys.SETTINGS_RESULT, ExtMap.class));
+                        context.mput(ContextKeys.SEARCH_RESULT,
+                             authorization.getResults(
+                                 context.get(ContextKeys.SEARCH_FILTER, String.class),
+                                 context.get(Global.InvokeKeys.SEARCH_CONTEXT, ExtMap.class)
+                             )
+                        );
+
+                    } catch (SQLException | IOException e) {
+                        context.put(ContextKeys.EXIT_STATUS, SQL_ERROR);
+                        addContextMessage(context, true, e.getMessage());
+                        context.<List<Throwable>>get(ContextKeys.THROWABLES).add(e);
+                    }
+                }
+            },
+            new Command() {
+                @Override
+                public String getName() {
+                    return "_show";
+                }
+
+                private String formatValue(Map.Entry<ExtKey, Object> entry) {
+                    if (entry.getValue() == null) {
+                        return "";
+                    } else if (Schema.UserKeys.PASSWORD_VALID_TO.equals(entry.getKey()) ||
+                            Schema.UserKeys.SUCCESSFUL_LOGIN.equals(entry.getKey()) ||
+                            Schema.UserKeys.UNLOCK_TIME.equals(entry.getKey()) ||
+                            Schema.UserKeys.UNSUCCESSFUL_LOGIN.equals(entry.getKey()) ||
+                            Schema.UserKeys.VALID_FROM.equals(entry.getKey()) ||
+                            Schema.UserKeys.VALID_TO.equals(entry.getKey())) {
+                        return DateUtils.toISO((Long) entry.getValue());
+                    } else {
+                        return entry.getValue().toString();
+                    }
+                }
+
+		private Properties loadPropertiesFromFile() {
+                    Properties properties = new Properties();
+                    try (InputStream input = new FileInputStream("/usr/share/ovirt-engine/conf/entity-templates.properties")) {
+                         properties.load(input);
+                    } catch (IOException e) {
+                         e.printStackTrace();
+                    } 
+                    return properties;
+                }
+
+                @Override
+                public void invoke(ExtMap context, Map<String, Object> args) {
+                    Properties templates = loadPropertiesFromJar("entity-templates.properties");
+                    //Properties templates = loadPropertiesFromFile();
+                    String providedTemplate = null;
+                    if (context.containsKey(ContextKeys.SHOW_TEMPLATE)) {
+                        providedTemplate = templates.get(context.<String>get(ContextKeys.SHOW_TEMPLATE)).toString();
+                    }
+
+                    @SuppressWarnings("unchecked")
+                    Collection<ExtMap> results = context.get(
+                        ContextKeys.SEARCH_RESULT,
+                        Collection.class,
+                        Collections.emptyList()
+                    );
+
+                    for (ExtMap result : results) {
+                        String out =
+                            providedTemplate == null ?
+                                (
+                                    result.containsKey(Authz.PrincipalRecord.ID) ?
+                                    templates.get("user").toString() :
+                                    templates.get("group").toString()
+                                ) :
+                                providedTemplate;
+                        for (Map.Entry<ExtKey, Object> entry : result.entrySet()) {
+                            Matcher m = Pattern.compile(
+                                String.format(
+                                    "@%s@",
+                                    entry.getKey().getUuid().getUuid()
+                                )
+                            ).matcher(out);
+                            out = m.replaceAll(
+                                    Matcher.quoteReplacement(formatValue(entry))
+                            );
+                        }
+                        addContextMessage(context, false, out);
+                    }
+                    context.put(ContextKeys.EXIT_STATUS, SUCCESS);
+                }
+            }
+        )) {
+            commands.put(cmd.getName(), cmd);
+        }
+    }
+
+    public static void main(String[] args) {
+        ExtMap context = new ExtMap();
+
+        try {
+            // init context
+            context.mput(ContextKeys.TAIL, new LinkedList<>(Arrays.asList(args)));
+            context.put(Schema.InvokeKeys.SETTINGS_RESULT, new ExtMap());
+            context.put(ContextKeys.THROWABLES, new ArrayList<>());
+            context.put(ContextKeys.ERR_MESSAGES, new ArrayList<>());
+            context.put(ContextKeys.OUT_MESSAGES, new ArrayList<>());
+
+            // Invoke commands
+            commands.get("root").invoke(context);
+
+
+            for (String msg: context.<List<String>>get(ContextKeys.ERR_MESSAGES)) {
+                System.err.print(newLine(msg));
+            }
+
+
+            for (String msg: context.<List<String>>get(ContextKeys.OUT_MESSAGES)) {
+                System.out.print(newLine(msg));
+            }
+
+            for (Throwable thr: context.<List<Throwable>>get(ContextKeys.THROWABLES)) {
+                LOG.debug("Exception", thr);
+            }
+            System.exit(
+                context.get(ContextKeys.EXIT_STATUS, Integer.class, SUCCESS)
+            );
+        } catch (Throwable t) {
+            if (context.get(ContextKeys.LOGGING_STARTED, Boolean.class, false)) {
+                LOG.error("Unexpected Exception invoking Cli: {}", t.getMessage());
+                LOG.debug("exception", t);
+            } else {
+                t.printStackTrace();
+            }
+            System.exit(GENERAL_ERROR);
+        }
+    }
+
+    private static void addContextMessage(ExtMap context, boolean error, String message) {
+        ExtKey key;
+        if (error) {
+            key = ContextKeys.ERR_MESSAGES;
+        } else {
+            key = ContextKeys.OUT_MESSAGES;
+        }
+        context.<List<String>>get(key).add(message);
+    }
+
+    private static Properties loadPropertiesFromFile(String filename) {
+
+        LOG.info("+++++loadPropertiesFromFile+++++");
+
+        String encryptFlag;
+        int iterations = 200_000;  // 기본값(설정 없을 때)
+        byte[] salt, nonce, keyCiphertext;
+
+        try {
+            // /etc/ovirt-engine/encryptor/config.json 로드
+            File configFile = new File("/etc/ovirt-engine/encryptor/config.json");
+            ObjectMapper objectMapper = new ObjectMapper();
+            JsonNode cfg = objectMapper.readTree(configFile);
+
+            // encrypt_flag
+            encryptFlag = cfg.get("encrypt_flag").asText("").trim().toUpperCase();
+
+            // salt / nonce / decrypt_key_ciphertext / iterations
+            String saltB64  = optText(cfg, "salt");
+            String nonceB64 = optText(cfg, "nonce");
+            String ctB64    = optText(cfg, "decrypt_key_ciphertext");
+            if (saltB64 == null || nonceB64 == null || ctB64 == null) {
+                throw new IllegalStateException("config.json에 salt/nonce/decrypt_key_ciphertext가 없습니다.");
+            }
+            salt          = Base64.getDecoder().decode(saltB64);
+            nonce         = Base64.getDecoder().decode(nonceB64);
+            keyCiphertext = Base64.getDecoder().decode(ctB64);
+            if (cfg.hasNonNull("iterations")) {
+                iterations = cfg.get("iterations").asInt(200_000);
+            }
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to read configuration from /etc/ovirt-engine/encryptor/config.json", e);
+        }
+
+        // 암호화 대상 파일 목록
+        Set<String> encryptedFiles = Set.of(
+            "10-setup-database.conf",
+            "10-setup-dwh-database.conf",
+            "internal.properties"
+            // 필요 시 "10-setup-grafana-database.conf" 추가 가능
+        );
+
+        String decryptedContent = "";
+        String extractedFilename = new File(filename).getName();
+        File file = new File(filename);
+
+        boolean isEncrypted = encryptedFiles.contains(extractedFilename);
+
+        if ("YES".equals(encryptFlag) && isEncrypted) {
+            try {
+                // 1) MAC(또는 ENV) → 패스프레이즈
+                byte[] passphrase = getMacPassphrase(null); // null이면 기본 라우트/NIC 자동
+                if (passphrase == null || passphrase.length == 0) {
+                    String env = System.getenv("OVIRT_ENC_PASSPHRASE");
+                    if (env == null || env.isEmpty()) {
+                        throw new IllegalStateException("MAC 패스프레이즈 획득 실패 및 OVIRT_ENC_PASSPHRASE 미설정");
+                    }
+                    passphrase = env.getBytes(StandardCharsets.UTF_8);
+                }
+
+                // (선택) 호스트 바인딩 강화: /etc/machine-id pepper 추가
+                // try {
+                //     String machineId = Files.readString(Path.of("/etc/machine-id")).trim();
+                //     passphrase = concat(passphrase, ("|" + machineId).getBytes(StandardCharsets.UTF_8));
+                // } catch (Exception ignore) {}
+
+                // 2) PBKDF2-HMAC-SHA256 → KEK
+                byte[] kek = deriveKek(passphrase, salt, iterations, 32);
+
+                // 3) AES-GCM(KEK, nonce)로 decrypt_key_ciphertext 복호화 → 데이터키(32바이트)
+                byte[] dataKey = decryptGCM(keyCiphertext, kek, nonce);
+                if (dataKey.length != 32) {
+                    throw new IllegalStateException("복원된 데이터키 길이가 32바이트(AES-256)가 아닙니다.");
+                }
+
+                // 4) 파일 AES-256-CBC 복호화(IV=파일 앞 16바이트)
+                decryptedContent = decryptFileCBC(file, dataKey);
+            } catch (Exception e) {
+                throw new RuntimeException("설정 파일 복호화 실패: " + filename, e);
+            }
+        } else {
+            isEncrypted = false;
+        }
+
+        try (BufferedReader reader =
+                 isEncrypted
+                     ? new BufferedReader(new StringReader(decryptedContent))
+                     : new BufferedReader(new InputStreamReader(new FileInputStream(file), StandardCharsets.UTF_8))) {
+
+            Properties p = new Properties();
+            p.load(reader);
+            LOG.trace("read properties from {}:", filename);
+            for (Map.Entry<Object, Object> e : p.entrySet()) {
+                LOG.trace("{}=>{}", e.getKey(),
+                    SENSISTIVE_DATA.contains(e.getKey()) ? "****" : e.getValue());
+            }
+            return p;
+        } catch (Exception e) {
+            throw new RuntimeException("Could not read properties from: " + filename, e);
+        }
+    }
+   private static String decryptFileWithOpenSSL(File file, String keyHex){
+
+      final int IV_SIZE = 16; // AES block size
+
+      byte[] key = hexStringToByteArray(keyHex);
+
+      try (FileInputStream fis = new FileInputStream(file)) {
+
+
+        // Read IV
+        byte[] iv = new byte[IV_SIZE];
+        fis.read(iv);
+
+        // Read the encrypted data
+        byte[] encryptedData = fis.readAllBytes();
+        fis.close();
+
+        // Create AES key and IV parameter spec
+        SecretKeySpec secretKeySpec = new SecretKeySpec(key, "AES");
+        IvParameterSpec ivParameterSpec = new IvParameterSpec(iv);
+
+        // Initialize Cipher for decryption
+        Cipher cipher = Cipher.getInstance("AES/CBC/PKCS5Padding");
+        cipher.init(Cipher.DECRYPT_MODE, secretKeySpec, ivParameterSpec);
+
+        // Decrypt and remove padding
+        byte[] decryptedData = cipher.doFinal(encryptedData);
+
+        return new String(decryptedData, StandardCharsets.UTF_8);
+      } catch (Exception e) {
+         throw new RuntimeException("Error during AES decryption of file: ", e);
+      }
+
+
+   }
+
+   // Utility to convert a hex string to a byte array
+    private static byte[] hexStringToByteArray(String s) {
+        int len = s.length();
+        byte[] data = new byte[len / 2];
+        for (int i = 0; i < len; i += 2) {
+            data[i / 2] = (byte) ((Character.digit(s.charAt(i), 16) << 4)
+                    + Character.digit(s.charAt(i+1), 16));
+        }
+        return data;
+    }
+
+    
+    private static Properties loadPropertiesFromJar1(String filename) {
+
+        LOG.info("+++++loadPropertiesFromJar+++++");
+
+        String encryptFlag;
+        int iterations = 200_000;
+        byte[] salt, nonce, keyCiphertext;
+
+        try {
+            File configFile = new File("/etc/ovirt-engine/encryptor/config.json");
+            ObjectMapper objectMapper = new ObjectMapper();
+            JsonNode cfg = objectMapper.readTree(configFile);
+
+            encryptFlag = cfg.get("encrypt_flag").asText("").trim().toUpperCase();
+
+            String saltB64  = optText(cfg, "salt");
+            String nonceB64 = optText(cfg, "nonce");
+            String ctB64    = optText(cfg, "decrypt_key_ciphertext");
+            if (saltB64 == null || nonceB64 == null || ctB64 == null) {
+                throw new IllegalStateException("config.json에 salt/nonce/decrypt_key_ciphertext가 없습니다.");
+            }
+            salt          = Base64.getDecoder().decode(saltB64);
+            nonce         = Base64.getDecoder().decode(nonceB64);
+            keyCiphertext = Base64.getDecoder().decode(ctB64);
+            if (cfg.hasNonNull("iterations")) {
+                iterations = cfg.get("iterations").asInt(200_000);
+            }
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to read configuration from /etc/ovirt-engine/encryptor/config.json", e);
+        }
+
+        Set<String> encryptedFiles = Set.of(
+            "10-setup-database.conf",
+            "10-setup-dwh-database.conf",
+            "internal.properties"
+        );
+
+        String extractedFilename = new File(filename).getName();
+        LOG.info("+++++File Name: {}+++++", extractedFilename);
+
+        // entity-templates.properties는 고정 경로 사용
+        File file = "entity-templates.properties".equals(extractedFilename)
+            ? new File("/usr/share/ovirt-engine/conf/entity-templates.properties")
+            : new File(filename);
+
+        boolean isEncrypted = encryptedFiles.contains(extractedFilename);
+        String decryptedContent = "";
+
+        if ("YES".equals(encryptFlag) && isEncrypted) {
+            try {
+                byte[] passphrase = getMacPassphrase(null);
+                if (passphrase == null || passphrase.length == 0) {
+                    String env = System.getenv("OVIRT_ENC_PASSPHRASE");
+                    if (env == null || env.isEmpty()) {
+                        throw new IllegalStateException("MAC 패스프레이즈 획득 실패 및 OVIRT_ENC_PASSPHRASE 미설정");
+                    }
+                    passphrase = env.getBytes(StandardCharsets.UTF_8);
+                }
+
+                // (선택) pepper 추가
+                // try {
+                //     String machineId = Files.readString(Path.of("/etc/machine-id")).trim();
+                //     passphrase = concat(passphrase, ("|" + machineId).getBytes(StandardCharsets.UTF_8));
+                // } catch (Exception ignore) {}
+
+                byte[] kek = deriveKek(passphrase, salt, iterations, 32);
+                byte[] dataKey = decryptGCM(keyCiphertext, kek, nonce);
+                if (dataKey.length != 32) {
+                    throw new IllegalStateException("복원된 데이터키 길이가 32바이트(AES-256)가 아닙니다.");
+                }
+
+                decryptedContent = decryptFileCBC(file, dataKey);
+            } catch (Exception e) {
+                throw new RuntimeException("설정 파일 복호화 실패(JAR1): " + filename, e);
+            }
+        } else {
+            isEncrypted = false;
+        }
+
+        try (BufferedReader reader =
+                 isEncrypted
+                     ? new BufferedReader(new StringReader(decryptedContent))
+                     : new BufferedReader(new InputStreamReader(new FileInputStream(file), StandardCharsets.UTF_8))) {
+
+            Properties p = new Properties();
+            p.load(reader);
+            LOG.trace("read properties from {}:", filename);
+            for (Map.Entry<Object, Object> e : p.entrySet()) {
+                LOG.trace("{}=>{}", e.getKey(), e.getValue());
+            }
+            return p;
+        } catch (Exception e) {
+            throw new RuntimeException("Could not read properties from: " + filename, e);
+        }
+    }
+
+    
+     
+    
+     private static Properties loadPropertiesFromJar(String filename) {
+        try (
+            InputStream is = Cli.class.getResourceAsStream(filename);
+            Reader reader = new InputStreamReader(is, Charset.forName("UTF-8"))
+        ) {
+            Properties p = new Properties();
+            p.load(reader);
+            LOG.trace("read properties from {}:", filename);
+            for(Map.Entry<Object, Object> e: p.entrySet()) {
+                LOG.trace("{}=>{}", e.getKey(), e.getValue());
+            }
+            return p;
+        } catch (Exception e) {
+            throw new RuntimeException("Could not read properties from: " + filename, e);
+        }
+    }
+    private static void setupLogging(Level level) {
+        java.util.logging.Logger jdbc = java.util.logging.Logger.getLogger("org.ovirt.engine.extension.aaa.jdbc");
+        jdbc.setLevel(level);
+        Handler[] handlers = jdbc.getHandlers();
+        for (Handler handler : handlers) {
+            jdbc.removeHandler(handler);
+        }
+        ConsoleHandler handler = new ConsoleHandler();
+        handler.setLevel(level);
+        jdbc.addHandler(handler);
+    }
+
+    /**
+     * Put Schema.InvokeKeys.ENTITY_KEYS OR Cli.ContextKeys.EXIT_STATUS into context
+     *
+     * @param context current context
+     * @param args arguments provided by user and parsed by argumentsParser
+     * @return context after addition
+     */
+    private static ExtMap putUserAddKeys(ExtMap context, Map<String, Object> args) {
+        ExtMap keys = new ExtMap();
+
+        try {
+            keys.putAll(INSERT_DEFAULTS);
+            keys.mput(
+                Schema.UserIdentifiers.USERNAME,
+                context.<String>get(ContextKeys.POSITIONAL)
+            ).mput(
+                Schema.UserKeys.NEW_USERNAME,
+                context.<String>get(ContextKeys.POSITIONAL)
+            ).mput(
+                Schema.UserKeys.PASSWORD,
+                ""
+            ).mput(
+                Schema.UserKeys.VALID_FROM,
+                (
+                    args.get("account-valid-from") != null ?
+                    DateUtils.fromISO((String) args.get("account-valid-from")) :
+                    System.currentTimeMillis()
+                )
+            ).mput(
+                Schema.UserKeys.VALID_TO,
+                (
+                    args.get("account-valid-to") != null?
+                    DateUtils.fromISO((String)args.get("account-valid-to")) :
+                    DateUtils.add(System.currentTimeMillis(), Calendar.YEAR, 200)
+                )
+            ).mput(
+                Schema.UserKeys.LOGIN_ALLOWED,
+                args.get("account-login-time") != null ? args.get("account-login-time") : StringUtils.leftPad("", 336, '1')
+            ).mput(
+                Schema.UserKeys.UUID,
+                args.get("id")
+            ).mput(
+                Schema.UserKeys.DISABLED,
+                getDefFlag(args, "disabled", false)
+            ).mput(
+                Schema.UserKeys.NOPASS,
+                getDefFlag(args, "nopass", false)
+            ).mput(
+                Schema.SharedKeys.ATTRIBUTES,
+                createAttributes(args)
+            );
+            context.put(Schema.InvokeKeys.ENTITY_KEYS, keys);
+        } catch (ParseException e) {
+            addContextMessage(context, true, e.getMessage());
+            context.mput(ContextKeys.EXIT_STATUS, ARGUMENT_PARSING_ERROR);
+
+            context.<List<Throwable>>get(ContextKeys.THROWABLES).add(e);
+        }
+        return context;
+    }
+
+    /**
+     * Put Schema.InvokeKeys.ENTITY_KEYS OR Cli.ContextKeys.EXIT_STATUS into context
+     *
+     * @param context the Execution context to add on
+     * @param args arguments provided by user and parsed by argumentsParser
+     * @return context after addition
+     */
+    private static ExtMap putUserEditKeys(ExtMap context, Map<String, Object> args) {
+        ExtMap keys = new ExtMap();
+
+        try {
+            keys.mput(
+                Schema.UserIdentifiers.USERNAME,
+                context.<String>get(ContextKeys.POSITIONAL)
+            ).mput(
+                Schema.UserKeys.NEW_USERNAME,
+                args.get("new-name")
+            ).mput(
+                Schema.UserKeys.PASSWORD_VALID_TO,
+                (
+                    args.get("password-valid-to") != null ?
+                    DateUtils.fromISO((String)args.get("password-valid-to")):
+                    null
+                )
+            ).mput(
+                Schema.UserKeys.VALID_FROM,
+                (
+                    args.get("account-valid-from") != null ?
+                    DateUtils.fromISO((String)args.get("account-valid-from")):
+                    null
+                )
+            ).mput(
+                Schema.UserKeys.VALID_TO,
+                (
+                    args.get("account-valid-to") != null ?
+                    DateUtils.fromISO((String)args.get("account-valid-to")):
+                    null
+                )
+            ).mput(
+                Schema.UserKeys.LOGIN_ALLOWED,
+                args.get("account-login-time")
+            ).mput(
+                Schema.UserKeys.UUID,
+                args.get("id")
+            ).mput(
+                Schema.UserKeys.DISABLED,
+                getDefFlag(args, "disabled", null)
+            ).mput(
+                Schema.UserKeys.NOPASS,
+                getDefFlag(args, "nopass", null)
+            ).mput(
+                Schema.SharedKeys.ATTRIBUTES,
+                createAttributes(args)
+            );
+        } catch (ParseException e) {
+            addContextMessage(context, true, e.getMessage());
+            context.mput(ContextKeys.EXIT_STATUS, ARGUMENT_PARSING_ERROR);
+        }
+        return context.mput(Schema.InvokeKeys.ENTITY_KEYS, keys);
+    }
+
+    /**
+     * Create user attributes collection
+     *
+     * @param args user input map
+     * @return a collection of ExtMaps each representing an attribute.
+     */
+    private static Collection<ExtMap> createAttributes(Map<String, Object> args) {
+        Collection<ExtMap> attributes = new ArrayList<>();
+        if (args.get("attribute") != null) {
+
+            @SuppressWarnings("unchecked")
+            List<String> attributeDescriptors = (List<String>) args.get("attribute");
+            for (String attributeDescriptor: attributeDescriptors) {
+                attributes.add(
+                    new ExtMap().mput(
+                        Schema.SharedKeys.ATTRIBUTE_NAME,
+                        attributeDescriptor.split("=", 2)[0]
+                    ).mput(
+                        Schema.SharedKeys.ATTRIBUTE_VALUE,
+                        attributeDescriptor.split("=", 2)[1]
+                    )
+                );
+            }
+        }
+        return attributes;
+    }
+
+    private static String readPasswordInteractively(ExtMap context) throws IOException {
+        String pass1 = new String(System.console().readPassword("Password:"));
+        String pass2 = new String(System.console().readPassword("Reenter password:"));
+        if (!Objects.equals(pass1, pass2)) {
+            context.put(ContextKeys.EXIT_STATUS, GENERAL_ERROR);
+            addContextMessage(context, true, "Passwords don't match!");
+            return null;
+        } else {
+            return pass1;
+        }
+    }
+
+    private static void putUserResetPassParams(ExtMap context, Map<String, Object> args) throws IOException {
+        String pass;
+        String password = null;
+        try {
+            pass = (String) args.get("password");
+            String[] passwords = pass.split(":", 2);
+            ExtMap userParams = new ExtMap();
+            switch (passwords[0]) {
+                case "pass":
+                    password = passwords[1];
+                    break;
+                case "env":
+                    password = System.getenv(passwords[1]);
+                    break;
+                case "file":
+                    password = readFile(passwords[1]);
+                    break;
+                case "interactive":
+                    password = readPasswordInteractively(context);
+                    break;
+                case "none":
+                    userParams.put(Schema.UserKeys.NOPASS, true);
+                    break;
+            }
+
+            userParams.mput(Schema.UserIdentifiers.USERNAME, context.<String>get(ContextKeys.POSITIONAL))
+            .mput(Schema.UserKeys.PASSWORD, password)
+            .mput(
+                Schema.UserKeys.PASSWORD_VALID_TO,
+                args.get("password-valid-to") != null ?
+                    DateUtils.fromISO((String) args.get("password-valid-to")) :
+                    null
+            )
+            .mput(
+                Schema.UserKeys.FORCE_PASSWORD,
+                args.get("force")
+            );
+            context.mput(
+                Schema.InvokeKeys.ENTITY_KEYS,
+                userParams
+                );
+        } catch (ParseException e) {
+            addContextMessage(context, true, e.getMessage());
+            context.mput(ContextKeys.EXIT_STATUS, ARGUMENT_PARSING_ERROR);;
+        }
+    }
+
+    private static ExtMap getGroupKeys(Map<String, Object> args, String name) {
+        return new ExtMap().mput(
+            Schema.GroupIdentifiers.NAME,
+            name
+        ).mput(
+            Schema.GroupKeys.UUID,
+            args.get("id") // throw an exception if needed
+        ).mput(
+            Schema.SharedKeys.ATTRIBUTES,
+            createAttributes(args)
+        ).mput(
+            Schema.GroupKeys.NEW_NAME,
+            args.get("new-name")
+        );
+    }
+
+    private static String newLine(String message) {
+        return message.endsWith("\n")? message: message + "\n";
+    }
+
+
+    @SuppressWarnings("unchecked")
+    private static Boolean getDefFlag(Map<String, Object> input, String name, Boolean def) {
+        Boolean ret = null;
+        if (input.get("flag") != null) {
+
+            for (String flag: (List<String>) input.get("flag")) {
+                if (flag.substring(1).equals(name)) {
+                    ret = flag.startsWith("+");
+                }
+            }
+        }
+        return ret!= null? ret: def;
+    }
+
+    
+    private static String readFile(String path) throws IOException {
+        LOG.info("+++++ readFile +++++");
+
+        String encryptFlag;
+        int iterations = 200_000; // 기본값
+        byte[] salt, nonce, keyCiphertext;
+
+        // 1) /etc/ovirt-engine/encryptor/config.json 로드
+        try {
+            File configFile = new File("/etc/ovirt-engine/encryptor/config.json");
+            ObjectMapper objectMapper = new ObjectMapper();
+            JsonNode cfg = objectMapper.readTree(configFile);
+
+            encryptFlag = cfg.get("encrypt_flag").asText("").trim().toUpperCase();
+
+            String saltB64  = optText(cfg, "salt");
+            String nonceB64 = optText(cfg, "nonce");
+            String ctB64    = optText(cfg, "decrypt_key_ciphertext");
+            if (saltB64 == null || nonceB64 == null || ctB64 == null) {
+                throw new IllegalStateException("config.json에 salt/nonce/decrypt_key_ciphertext가 없습니다.");
+            }
+
+            salt          = Base64.getDecoder().decode(saltB64);
+            nonce         = Base64.getDecoder().decode(nonceB64);
+            keyCiphertext = Base64.getDecoder().decode(ctB64);
+            if (cfg.hasNonNull("iterations")) {
+                iterations = cfg.get("iterations").asInt(200_000);
+            }
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to read configuration from /etc/ovirt-engine/encryptor/config.json", e);
+        }
+
+        StringBuilder sb = new StringBuilder();
+        String extractedFilename = new File(path).getName();
+        File file = new File(path);
+
+        // 2) 암호화 대상 파일 목록
+        boolean targetEncrypted = extractedFilename.equals("10-setup-database.conf")
+                               || extractedFilename.equals("10-setup-dwh-database.conf")
+                               || extractedFilename.equals("internal.properties");
+
+        if ("YES".equals(encryptFlag) && targetEncrypted) {
+            try {
+                // 3) 패스프레이즈: MAC 주소 우선, 실패 시 ENV 폴백
+                byte[] passphrase = getMacPassphrase(null); // null: 기본 라우트/NIC 자동
+                if (passphrase == null || passphrase.length == 0) {
+                    String env = System.getenv("OVIRT_ENC_PASSPHRASE");
+                    if (env == null || env.isEmpty()) {
+                        throw new IllegalStateException("MAC 패스프레이즈 획득 실패 및 OVIRT_ENC_PASSPHRASE 미설정");
+                    }
+                    passphrase = env.getBytes(StandardCharsets.UTF_8);
+                }
+
+                // (선택) 호스트 바인딩 강화: /etc/machine-id pepper 추가
+                // try {
+                //     String machineId = Files.readString(Path.of("/etc/machine-id")).trim();
+                //     passphrase = concat(passphrase, ("|" + machineId).getBytes(StandardCharsets.UTF_8));
+                // } catch (Exception ignore) {}
+
+                // 4) PBKDF2-HMAC-SHA256 → KEK
+                byte[] kek = deriveKek(passphrase, salt, iterations, 32);
+
+                // 5) AES-GCM(KEK, nonce)로 decrypt_key_ciphertext 복호화 → 데이터키(32바이트)
+                byte[] dataKey = decryptGCM(keyCiphertext, kek, nonce);
+                if (dataKey.length != 32) {
+                    throw new IllegalStateException("복원된 데이터키 길이가 32바이트(AES-256)가 아닙니다.");
+                }
+
+                // 6) 파일 AES-256-CBC 복호화 (IV=파일 선두 16바이트)
+                String decryptedContent = decryptFileCBC(file, dataKey);
+                sb.append(decryptedContent);
+            } catch (Exception e) {
+                throw new RuntimeException("파일 복호화 실패: " + path, e);
+            }
+        } else {
+            // 평문 파일 읽기 (원래 로직 유지: 개행 없이 라인 이어붙임)
+            for (String line : Files.readAllLines(Paths.get(path), StandardCharsets.UTF_8)) {
+                sb.append(line);
+            }
+        }
+
+        return sb.toString();
+    }
+   
+  
+    public static void getGroup(ExtMap context) {
+        context.put(
+            ContextKeys.SEARCH_FILTER,
+            Formatter.format(
+                "{} = {}",
+                Schema.SEARCH_KEYS.get(Authz.GroupRecord.NAME),
+                Formatter.escapeString(context.get(ContextKeys.POSITIONAL, String.class))
+            )
+        );
+        context.mput(Global.InvokeKeys.SEARCH_CONTEXT,
+            new ExtMap().mput(Global.SearchContext.PAGE_SIZE, 1)
+            .mput(Global.SearchContext.IS_PRINCIPAL, false)
+            .mput(Global.SearchContext.RECURSIVE, false)
+            .mput(Global.SearchContext.WITH_GROUPS, true)
+            .mput(Global.SearchContext.ALL_ATTRIBUTES, true)
+        );
+
+        commands.get("_search").invoke(context);
+        if (
+            context.get(ContextKeys.SEARCH_RESULT, Collection.class) == null ||
+            context.get(ContextKeys.SEARCH_RESULT, Collection.class).size() == 0
+        ) {
+            addContextMessage(context, true, Formatter.format(
+                "group {} not found",
+                context.<String>get(ContextKeys.POSITIONAL)
+            ));
+            context.put(ContextKeys.EXIT_STATUS, NOT_FOUND);
+        }
+    }
+    
+    
+ // -------- JSON 편의 --------
+    private static String optText(JsonNode node, String field) {
+        return (node.hasNonNull(field) ? node.get(field).asText() : null);
+    }
+
+    // -------- AES-256-CBC 파일 복호화 (IV=파일 앞 16바이트) --------
+    private static String decryptFileCBC(File file, byte[] dataKey) {
+        final int IV_SIZE = 16;
+        try (FileInputStream fis = new FileInputStream(file)) {
+            byte[] iv = new byte[IV_SIZE];
+            int n = fis.read(iv);
+            if (n != IV_SIZE) throw new IllegalStateException("IV 읽기 실패 또는 파일 손상: " + file);
+
+            byte[] enc = fis.readAllBytes();
+
+            SecretKeySpec keySpec = new SecretKeySpec(dataKey, "AES");
+            IvParameterSpec ivSpec = new IvParameterSpec(iv);
+
+            Cipher cipher = Cipher.getInstance("AES/CBC/PKCS5Padding");
+            cipher.init(Cipher.DECRYPT_MODE, keySpec, ivSpec);
+
+            byte[] plain = cipher.doFinal(enc);
+            return new String(plain, StandardCharsets.UTF_8);
+        } catch (Exception e) {
+            throw new RuntimeException("AES-256-CBC 파일 복호화 오류: " + file, e);
+        }
+    }
+
+    // -------- AES-GCM(KEK)로 데이터키 복호화 --------
+    private static byte[] decryptGCM(byte[] ciphertext, byte[] kek, byte[] nonce) {
+        try {
+            Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
+            GCMParameterSpec spec = new GCMParameterSpec(128, nonce);
+            cipher.init(Cipher.DECRYPT_MODE, new SecretKeySpec(kek, "AES"), spec);
+            return cipher.doFinal(ciphertext);
+        } catch (Exception e) {
+            throw new RuntimeException("AES-GCM 복호화 실패(데이터키)", e);
+        }
+    }
+
+    // -------- PBKDF2-HMAC-SHA256 (KEK 도출) --------
+    private static byte[] deriveKek(byte[] passphrase, byte[] salt, int iterations, int outLen) {
+        try {
+            PBEKeySpec spec = new PBEKeySpec(
+                new String(passphrase, StandardCharsets.UTF_8).toCharArray(),
+                salt,
+                iterations,
+                outLen * 8
+            );
+            SecretKeyFactory skf = SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256");
+            return skf.generateSecret(spec).getEncoded();
+        } catch (Exception e) {
+            throw new RuntimeException("PBKDF2 KEK 도출 실패", e);
+        }
+    }
+
+    // -------- MAC 패스프레이즈 획득(기본 라우트 우선, 폴백은 활성 NIC) --------
+    private static byte[] getMacPassphrase(String preferIface) {
+        try {
+            if (preferIface != null && !preferIface.isEmpty()) {
+                String mac = readMacByName(preferIface);
+                if (mac != null) return mac.getBytes(StandardCharsets.US_ASCII);
+            }
+            String def = detectDefaultIface();
+            if (def != null) {
+                String mac = readMacByName(def);
+                if (mac != null) return mac.getBytes(StandardCharsets.US_ASCII);
+            }
+            Enumeration<NetworkInterface> nis = NetworkInterface.getNetworkInterfaces();
+            while (nis.hasMoreElements()) {
+                NetworkInterface ni = nis.nextElement();
+                if (ni == null || ni.isLoopback() || ni.isVirtual() || !ni.isUp()) continue;
+                byte[] hw = ni.getHardwareAddress();
+                if (hw != null && hw.length == 6) {
+                    return toMacString(hw).getBytes(StandardCharsets.US_ASCII);
+                }
+            }
+        } catch (Exception ignore) {}
+        return null;
+    }
+
+    private static String readMacByName(String iface) {
+        try {
+            NetworkInterface ni = NetworkInterface.getByName(iface);
+            if (ni == null || !ni.isUp()) return null;
+            byte[] hw = ni.getHardwareAddress();
+            if (hw == null || hw.length != 6) return null;
+            return toMacString(hw);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    private static String toMacString(byte[] hw) {
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < hw.length; i++) {
+            if (i > 0) sb.append(':');
+            sb.append(String.format("%02x", hw[i]));
+        }
+        return sb.toString();
+    }
+
+    // 기본 라우트 NIC 감지(/proc/net/route 사용)
+    private static String detectDefaultIface() {
+        File f = new File("/proc/net/route");
+        if (!f.exists()) return null;
+        try (BufferedReader br = new BufferedReader(new FileReader(f))) {
+            br.readLine(); // header skip
+            List<String[]> zeros = new ArrayList<>();
+            String line;
+            while ((line = br.readLine()) != null) {
+                String[] c = line.trim().split("\\s+");
+                if (c.length < 11) continue;
+                String iface = c[0];
+                String dest  = c[1];
+                String flags = c[3];
+                if (!"00000000".equals(dest)) continue;
+                zeros.add(c);
+                try {
+                    int fl = Integer.parseInt(flags, 16);
+                    if ((fl & 0x2) != 0) return iface; // 게이트웨이 플래그
+                } catch (Exception ignore) {}
+            }
+            if (!zeros.isEmpty()) return zeros.get(0)[0];
+        } catch (Exception ignore) {}
+        return null;
+    }
+
+    // 바이트 배열 결합(pepper 추가 시 사용)
+    private static byte[] concat(byte[] a, byte[] b) {
+        byte[] out = new byte[a.length + b.length];
+        System.arraycopy(a, 0, out, 0, a.length);
+        System.arraycopy(b, 0, out, a.length, b.length);
+        return out;
+    }
+
+}
