@@ -1066,106 +1066,22 @@ public class Cli {
     }
 
     private static Properties loadPropertiesFromFile(String filename) {
-
-        LOG.info("+++++loadPropertiesFromFile+++++");
-
-        String encryptFlag;
-        int iterations = 200_000;  // 기본값(설정 없을 때)
-        byte[] salt, nonce, keyCiphertext;
-
         try {
-            // /etc/ovirt-engine/encryptor/config.json 로드
-            File configFile = new File("/etc/ovirt-engine/encryptor/config.json");
-            ObjectMapper objectMapper = new ObjectMapper();
-            JsonNode cfg = objectMapper.readTree(configFile);
-
-            // encrypt_flag
-            encryptFlag = cfg.get("encrypt_flag").asText("").trim().toUpperCase();
-
-            // salt / nonce / decrypt_key_ciphertext / iterations
-            String saltB64  = optText(cfg, "salt");
-            String nonceB64 = optText(cfg, "nonce");
-            String ctB64    = optText(cfg, "decrypt_key_ciphertext");
-            if (saltB64 == null || nonceB64 == null || ctB64 == null) {
-                throw new IllegalStateException("config.json에 salt/nonce/decrypt_key_ciphertext가 없습니다.");
-            }
-            salt          = Base64.getDecoder().decode(saltB64);
-            nonce         = Base64.getDecoder().decode(nonceB64);
-            keyCiphertext = Base64.getDecoder().decode(ctB64);
-            if (cfg.hasNonNull("iterations")) {
-                iterations = cfg.get("iterations").asInt(200_000);
-            }
-        } catch (Exception e) {
-            throw new RuntimeException("Failed to read configuration from /etc/ovirt-engine/encryptor/config.json", e);
-        }
-
-        // 암호화 대상 파일 목록
-        Set<String> encryptedFiles = Set.of(
-            "10-setup-database.conf",
-            "10-setup-dwh-database.conf",
-            "internal.properties"
-            // 필요 시 "10-setup-grafana-database.conf" 추가 가능
-        );
-
-        String decryptedContent = "";
-        String extractedFilename = new File(filename).getName();
-        File file = new File(filename);
-
-        boolean isEncrypted = encryptedFiles.contains(extractedFilename);
-
-        if ("YES".equals(encryptFlag) && isEncrypted) {
-            try {
-                // 1) MAC(또는 ENV) → 패스프레이즈
-                byte[] passphrase = getMacPassphrase(null); // null이면 기본 라우트/NIC 자동
-                if (passphrase == null || passphrase.length == 0) {
-                    String env = System.getenv("OVIRT_ENC_PASSPHRASE");
-                    if (env == null || env.isEmpty()) {
-                        throw new IllegalStateException("MAC 패스프레이즈 획득 실패 및 OVIRT_ENC_PASSPHRASE 미설정");
-                    }
-                    passphrase = env.getBytes(StandardCharsets.UTF_8);
-                }
-
-                // (선택) 호스트 바인딩 강화: /etc/machine-id pepper 추가
-                // try {
-                //     String machineId = Files.readString(Path.of("/etc/machine-id")).trim();
-                //     passphrase = concat(passphrase, ("|" + machineId).getBytes(StandardCharsets.UTF_8));
-                // } catch (Exception ignore) {}
-
-                // 2) PBKDF2-HMAC-SHA256 → KEK
-                byte[] kek = deriveKek(passphrase, salt, iterations, 32);
-
-                // 3) AES-GCM(KEK, nonce)로 decrypt_key_ciphertext 복호화 → 데이터키(32바이트)
-                byte[] dataKey = decryptGCM(keyCiphertext, kek, nonce);
-                if (dataKey.length != 32) {
-                    throw new IllegalStateException("복원된 데이터키 길이가 32바이트(AES-256)가 아닙니다.");
-                }
-
-                // 4) 파일 AES-256-CBC 복호화(IV=파일 앞 16바이트)
-                decryptedContent = decryptFileCBC(file, dataKey);
-            } catch (Exception e) {
-                throw new RuntimeException("설정 파일 복호화 실패: " + filename, e);
-            }
-        } else {
-            isEncrypted = false;
-        }
-
-        try (BufferedReader reader =
-                 isEncrypted
-                     ? new BufferedReader(new StringReader(decryptedContent))
-                     : new BufferedReader(new InputStreamReader(new FileInputStream(file), StandardCharsets.UTF_8))) {
-
-            Properties p = new Properties();
-            p.load(reader);
+            Properties properties = ExtensionUtils.loadPropertiesFromFile(filename);
             LOG.trace("read properties from {}:", filename);
-            for (Map.Entry<Object, Object> e : p.entrySet()) {
-                LOG.trace("{}=>{}", e.getKey(),
-                    SENSISTIVE_DATA.contains(e.getKey()) ? "****" : e.getValue());
+            for (Map.Entry<Object, Object> entry : properties.entrySet()) {
+                LOG.trace(
+                    "{}=>{}",
+                    entry.getKey(),
+                    SENSISTIVE_DATA.contains(entry.getKey()) ? "****" : entry.getValue()
+                );
             }
-            return p;
-        } catch (Exception e) {
+            return properties;
+        } catch (IOException e) {
             throw new RuntimeException("Could not read properties from: " + filename, e);
         }
     }
+
    private static String decryptFileWithOpenSSL(File file, String keyHex){
 
       final int IV_SIZE = 16; // AES block size

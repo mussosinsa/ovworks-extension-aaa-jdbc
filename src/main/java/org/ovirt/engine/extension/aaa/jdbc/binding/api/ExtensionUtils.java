@@ -7,37 +7,46 @@
  *
  *     http://www.apache.org/licenses/LICENSE-2.0
  *
- *     Unless required by applicable law or agreed to in writing, software
- *     distributed under the License is distributed on an "AS IS" BASIS,
- *     WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- *     See the License for the specific language governing permissions and
- *     limitations under the License.
- *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 package org.ovirt.engine.extension.aaa.jdbc.binding.api;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
+import java.io.ByteArrayInputStream;
 import java.io.File;
-import java.io.FileInputStream;
 import java.io.IOException;
 import java.io.InputStreamReader;
-import java.net.NetworkInterface;
-import java.nio.charset.Charset;
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.DirectoryStream;
 import java.nio.file.Files;
+import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.nio.file.attribute.PosixFilePermission;
 import java.sql.Connection;
 import java.sql.SQLException;
 import java.text.MessageFormat;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
-import java.util.Enumeration;
 import java.util.List;
 import java.util.Properties;
+import java.util.Set;
 
+import javax.crypto.AEADBadTagException;
+import javax.crypto.Cipher;
+import javax.crypto.SecretKeyFactory;
+import javax.crypto.spec.GCMParameterSpec;
+import javax.crypto.spec.PBEKeySpec;
+import javax.crypto.spec.SecretKeySpec;
 import javax.sql.DataSource;
 
 import org.ovirt.engine.api.extensions.Base;
@@ -46,195 +55,262 @@ import org.ovirt.engine.extension.aaa.jdbc.Formatter;
 import org.ovirt.engine.extension.aaa.jdbc.binding.Config;
 import org.ovirt.engine.extension.aaa.jdbc.core.datasource.Sql;
 
-import javax.crypto.Cipher;
-import javax.crypto.SecretKeyFactory;
-import javax.crypto.spec.IvParameterSpec;
-import javax.crypto.spec.PBEKeySpec;
-import javax.crypto.spec.SecretKeySpec;
-import javax.crypto.spec.GCMParameterSpec;
-import java.io.*;
-import java.nio.charset.StandardCharsets;
-import java.util.Base64;
-import java.util.Properties;
-import java.security.SecureRandom;
-
 public class ExtensionUtils {
 
-    private static final int IV_SIZE = 16; // AES 블록 크기
-    private static final int KEY_SIZE = 32; // AES-256 키 크기
+    private static final byte[] ENCRYPTED_MAGIC = "OVENC001".getBytes(StandardCharsets.US_ASCII);
+    private static final int ENCRYPTED_VERSION = 1;
+    private static final int PBKDF2_ITERATIONS = 600_000;
+    private static final int DATA_KEY_SIZE = 32;
+    private static final int WRAPPED_KEY_SIZE = DATA_KEY_SIZE + 16;
+    private static final int HEADER_SIZE = 8 + 1 + 4 + 16 + 12 + 12 + 2;
+    private static final Path ENCRYPTOR_CONFIG = Paths.get("/etc/ovirt-engine/encryptor/config.json");
+    private static final String DEFAULT_CREDENTIAL = "ovirt-encryptor-passphrase";
+    private static final String PASSPHRASE_ENV = "OVIRT_ENCRYPTOR_PASSPHRASE";
 
+    public static final ExtMap JDBC_INFO = new ExtMap().mput(
+        Base.ContextKeys.AUTHOR, "The oVirt Project"
+    ).mput(
+        Base.ContextKeys.LICENSE, "ASL 2.0"
+    ).mput(
+        Base.ContextKeys.HOME_URL, "http://www.ovirt.org"
+    ).mput(
+        Base.ContextKeys.VERSION, Config.PACKAGE_VERSION
+    ).mput(
+        Base.ContextKeys.EXTENSION_NOTES,
+        MessageFormat.format("Display name: {0}", Config.PACKAGE_NAME)
+    ).mput(
+        Base.ContextKeys.BUILD_INTERFACE_VERSION, Base.INTERFACE_VERSION_CURRENT
+    );
 
-    public static final ExtMap JDBC_INFO;
+    /** Load a properties file, transparently decrypting the OVENC001 format. */
+    public static Properties loadPropertiesFromFile(String filename) throws IOException {
+        return loadPropertiesFromFile(Paths.get(filename), ENCRYPTOR_CONFIG);
+    }
 
-    static {
-        JDBC_INFO = new ExtMap().mput(
-            Base.ContextKeys.AUTHOR,
-            "The oVirt Project"
-        ).mput(
-            Base.ContextKeys.LICENSE,
-            "ASL 2.0"
-        ).mput(
-            Base.ContextKeys.HOME_URL,
-            "http://www.ovirt.org"
-        ).mput(
-            Base.ContextKeys.VERSION,
-            Config.PACKAGE_VERSION
-        ).mput(
-            Base.ContextKeys.EXTENSION_NOTES,
-            MessageFormat.format(
-                "Display name: {0}",
-                Config.PACKAGE_NAME
-            )
-        ).mput(
-            Base.ContextKeys.BUILD_INTERFACE_VERSION,
-            Base.INTERFACE_VERSION_CURRENT
-        );
+    static Properties loadPropertiesFromFile(Path filename, Path encryptorConfig) throws IOException {
+        byte[] content = readRegularFile(filename, false);
+        if (startsWithMagic(content)) {
+            JsonNode config = loadEncryptorConfig(encryptorConfig);
+            byte[] passphrase = obtainPassphrase(config);
+            try {
+                content = decryptOvenc001(content, passphrase);
+            } finally {
+                Arrays.fill(passphrase, (byte) 0);
+            }
+        }
+
+        Properties properties = new Properties();
+        try (InputStreamReader reader = new InputStreamReader(
+                new ByteArrayInputStream(content), StandardCharsets.UTF_8)) {
+            properties.load(reader);
+        }
+        return properties;
     }
 
     public static Properties loadIncludedConfiguration(ExtMap context) throws IOException {
-
-        // ===== 1) /etc/ovirt-engine/encryptor/config.json 로드 =====
-        String encryptFlag;
-        int iterations = 200_000; // 기본값
-        byte[] salt, nonce, keyCiphertext;
-
-        try {
-            File configFile = new File("/etc/ovirt-engine/encryptor/config.json");
-            ObjectMapper objectMapper = new ObjectMapper();
-            JsonNode cfg = objectMapper.readTree(configFile);
-
-            encryptFlag = cfg.get("encrypt_flag").asText("").trim().toUpperCase();
-
-            String saltB64  = optText(cfg, "salt");
-            String nonceB64 = optText(cfg, "nonce");
-            String ctB64    = optText(cfg, "decrypt_key_ciphertext");
-            if (saltB64 == null || nonceB64 == null || ctB64 == null) {
-                throw new IllegalStateException("config.json에 salt/nonce/decrypt_key_ciphertext가 없습니다.");
-            }
-            salt          = Base64.getDecoder().decode(saltB64);
-            nonce         = Base64.getDecoder().decode(nonceB64);
-            keyCiphertext = Base64.getDecoder().decode(ctB64);
-            if (cfg.hasNonNull("iterations")) {
-                iterations = cfg.get("iterations").asInt(200_000);
-            }
-        } catch (Exception e) {
-            throw new RuntimeException("Failed to read configuration from /etc/ovirt-engine/encryptor/config.json", e);
+        Properties original = context.get(Base.ContextKeys.CONFIGURATION, Properties.class);
+        Properties expanded = new Properties(original);
+        String included = original.getProperty("config.datasource.file");
+        if (included != null) {
+            String configurationFile = context.get(
+                Base.ContextKeys.CONFIGURATION_FILE, String.class, "/dummy"
+            );
+            File target = getRelativeFile(new File(configurationFile).getParent(), included);
+            expanded.putAll(loadPropertiesFromFile(target.getPath()));
         }
-
-        // ===== 2) 기존 구성 불러오고, baseDir 계산 =====
-        try {
-            Properties originalConfig = context.get(Base.ContextKeys.CONFIGURATION, Properties.class);
-            Properties expandedConfig = new Properties(originalConfig);
-
-            String baseDir = "/";
-            try {
-                baseDir = new File(context.get(Base.ContextKeys.CONFIGURATION_FILE, String.class, "/dummy")).getParent();
-            } catch (Exception ex) {
-                // ignore
-            }
-
-            // 대상 파일 키: config.datasource.file
-            if (originalConfig.containsKey("config.datasource.file")) {
-                File target = getRelativeFile(baseDir, originalConfig.getProperty("config.datasource.file"));
-
-                if ("YES".equals(encryptFlag)) {
-                    // ===== 3) MAC(또는 ENV) → PBKDF2(KEK) → AES-GCM(데이터키) → 파일 AES-CBC 복호화 =====
-                    byte[] passphrase = getMacPassphrase(null); // null: 기본 라우트/NIC 자동
-                    if (passphrase == null || passphrase.length == 0) {
-                        String env = System.getenv("OVIRT_ENC_PASSPHRASE");
-                        if (env == null || env.isEmpty()) {
-                            throw new IllegalStateException("MAC 패스프레이즈 획득 실패 및 OVIRT_ENC_PASSPHRASE 미설정");
-                        }
-                        passphrase = env.getBytes(StandardCharsets.UTF_8);
-                    }
-
-                    // (선택) 호스트 바인딩 강화: /etc/machine-id pepper 추가
-                    // try {
-                    //     String machineId = Files.readString(Path.of("/etc/machine-id")).trim();
-                    //     passphrase = concat(passphrase, ("|" + machineId).getBytes(StandardCharsets.UTF_8));
-                    // } catch (Exception ignore) {}
-
-                    byte[] kek = deriveKek(passphrase, salt, iterations, 32);
-                    byte[] dataKey = decryptGCM(keyCiphertext, kek, nonce);
-                    if (dataKey.length != 32) {
-                        throw new IllegalStateException("복원된 데이터키 길이가 32바이트(AES-256)가 아닙니다.");
-                    }
-
-                    String decryptedContent = decryptFileCBC(target, dataKey); // IV=파일 선두 16바이트
-                    expandedConfig.load(
-                        new InputStreamReader(
-                            new ByteArrayInputStream(decryptedContent.getBytes(StandardCharsets.UTF_8)),
-                            StandardCharsets.UTF_8
-                        )
-                    );
-                } else {
-                    // 평문 로드
-                    expandedConfig.load(
-                        new InputStreamReader(new FileInputStream(target), StandardCharsets.UTF_8)
-                    );
-                }
-            }
-            return expandedConfig;
-        } catch (Exception ex) {
-            ex.printStackTrace();
-            throw ex;
-        }
+        return expanded;
     }
-
 
     private static File getRelativeFile(String baseDir, String fileName) {
-        File f = new File(fileName);
-        if (!f.isAbsolute()) {
-            f = new File(baseDir, fileName);
-        }
-        return f;
+        File file = new File(fileName);
+        return file.isAbsolute() ? file : new File(baseDir, fileName);
     }
 
-    private static String decryptFileWithOpenSSL(File file, String keyHex){
-
-      final int IV_SIZE = 16; // AES block size
-
-      byte[] key = hexStringToByteArray(keyHex);
-
-      try (FileInputStream fis = new FileInputStream(file)) {
-
-
-        // Read IV
-        byte[] iv = new byte[IV_SIZE];
-        fis.read(iv);
-
-        // Read the encrypted data
-        byte[] encryptedData = fis.readAllBytes();
-        fis.close();
-
-        // Create AES key and IV parameter spec
-        SecretKeySpec secretKeySpec = new SecretKeySpec(key, "AES");
-        IvParameterSpec ivParameterSpec = new IvParameterSpec(iv);
-
-        // Initialize Cipher for decryption
-        Cipher cipher = Cipher.getInstance("AES/CBC/PKCS5Padding");
-        cipher.init(Cipher.DECRYPT_MODE, secretKeySpec, ivParameterSpec);
-
-        // Decrypt and remove padding
-        byte[] decryptedData = cipher.doFinal(encryptedData);
-
-        return new String(decryptedData, StandardCharsets.UTF_8);
-      } catch (Exception e) {
-         throw new RuntimeException("Error during AES decryption of file: ", e);
-      }
-
-
-   }
-
-   // Utility to convert a hex string to a byte array
-    private static byte[] hexStringToByteArray(String s) {
-        int len = s.length();
-        byte[] data = new byte[len / 2];
-        for (int i = 0; i < len; i += 2) {
-            data[i / 2] = (byte) ((Character.digit(s.charAt(i), 16) << 4)
-                    + Character.digit(s.charAt(i+1), 16));
+    private static boolean startsWithMagic(byte[] data) {
+        if (data.length < ENCRYPTED_MAGIC.length) {
+            return false;
         }
-        return data;
+        for (int i = 0; i < ENCRYPTED_MAGIC.length; i++) {
+            if (data[i] != ENCRYPTED_MAGIC[i]) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    static byte[] decryptOvenc001(byte[] data, byte[] passphrase) throws IOException {
+        if (data.length < HEADER_SIZE + WRAPPED_KEY_SIZE + 16) {
+            throw new IOException("Encrypted file is truncated");
+        }
+
+        ByteBuffer header = ByteBuffer.wrap(data, 0, HEADER_SIZE).order(ByteOrder.BIG_ENDIAN);
+        byte[] magic = new byte[ENCRYPTED_MAGIC.length];
+        header.get(magic);
+        int version = Byte.toUnsignedInt(header.get());
+        int iterations = header.getInt();
+        byte[] salt = new byte[16];
+        byte[] keyNonce = new byte[12];
+        byte[] dataNonce = new byte[12];
+        header.get(salt);
+        header.get(keyNonce);
+        header.get(dataNonce);
+        int wrappedSize = Short.toUnsignedInt(header.getShort());
+
+        if (!Arrays.equals(magic, ENCRYPTED_MAGIC)) {
+            throw new IOException("Encrypted file magic header is missing");
+        }
+        if (version != ENCRYPTED_VERSION) {
+            throw new IOException("Unsupported encrypted file version: " + version);
+        }
+        if (iterations != PBKDF2_ITERATIONS) {
+            throw new IOException("Invalid PBKDF2 iteration count for this format version");
+        }
+        if (wrappedSize != WRAPPED_KEY_SIZE || data.length < HEADER_SIZE + wrappedSize + 16) {
+            throw new IOException("Invalid wrapped data-key length");
+        }
+
+        byte[] fixedHeader = Arrays.copyOfRange(data, 0, HEADER_SIZE);
+        byte[] wrappedKey = Arrays.copyOfRange(data, HEADER_SIZE, HEADER_SIZE + wrappedSize);
+        byte[] ciphertext = Arrays.copyOfRange(data, HEADER_SIZE + wrappedSize, data.length);
+        byte[] kek = null;
+        byte[] dataKey = null;
+        try {
+            kek = deriveKey(passphrase, salt, iterations);
+            dataKey = decryptGcm(wrappedKey, kek, keyNonce, fixedHeader);
+            if (dataKey.length != DATA_KEY_SIZE) {
+                throw new IOException("Invalid unwrapped data-key length");
+            }
+            byte[] associatedData = new byte[fixedHeader.length + wrappedKey.length];
+            System.arraycopy(fixedHeader, 0, associatedData, 0, fixedHeader.length);
+            System.arraycopy(wrappedKey, 0, associatedData, fixedHeader.length, wrappedKey.length);
+            return decryptGcm(ciphertext, dataKey, dataNonce, associatedData);
+        } catch (AEADBadTagException e) {
+            throw new IOException(
+                "Authentication failed: file is damaged, modified, or the key is wrong", e
+            );
+        } catch (IOException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new IOException("Unable to decrypt encrypted configuration", e);
+        } finally {
+            if (kek != null) {
+                Arrays.fill(kek, (byte) 0);
+            }
+            if (dataKey != null) {
+                Arrays.fill(dataKey, (byte) 0);
+            }
+        }
+    }
+
+    private static byte[] deriveKey(byte[] passphrase, byte[] salt, int iterations) throws Exception {
+        char[] characters = new String(passphrase, StandardCharsets.UTF_8).toCharArray();
+        try {
+            PBEKeySpec spec = new PBEKeySpec(characters, salt, iterations, 256);
+            try {
+                return SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256")
+                    .generateSecret(spec).getEncoded();
+            } finally {
+                spec.clearPassword();
+            }
+        } finally {
+            Arrays.fill(characters, '\0');
+        }
+    }
+
+    private static byte[] decryptGcm(byte[] ciphertext, byte[] key, byte[] nonce, byte[] aad)
+            throws Exception {
+        Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
+        cipher.init(Cipher.DECRYPT_MODE, new SecretKeySpec(key, "AES"), new GCMParameterSpec(128, nonce));
+        cipher.updateAAD(aad);
+        return cipher.doFinal(ciphertext);
+    }
+
+    private static JsonNode loadEncryptorConfig(Path path) throws IOException {
+        byte[] data = readRegularFile(path, true);
+        JsonNode config = new ObjectMapper().readTree(data);
+        if (config == null || !config.isObject()) {
+            throw new IOException("Encryptor configuration must be a JSON object");
+        }
+        return config;
+    }
+
+    private static byte[] obtainPassphrase(JsonNode config) throws IOException {
+        String credentialDirectory = System.getenv("CREDENTIALS_DIRECTORY");
+        String credentialName = text(config, "systemd_credential", DEFAULT_CREDENTIAL);
+        if (credentialDirectory != null) {
+            Path credential = Paths.get(credentialDirectory, credentialName);
+            if (Files.exists(credential, LinkOption.NOFOLLOW_LINKS)) {
+                return trimNewlines(readSecretFile(credential));
+            }
+        }
+
+        String environmentSecret = System.getenv(PASSPHRASE_ENV);
+        if (environmentSecret != null && !environmentSecret.isEmpty()) {
+            return environmentSecret.getBytes(StandardCharsets.UTF_8);
+        }
+
+        String secretFile = text(config, "secret_file", null);
+        if (secretFile != null) {
+            return trimNewlines(readSecretFile(Paths.get(secretFile)));
+        }
+        throw new IOException(
+            "No key credential available (systemd credential, environment, or 0600 secret file)"
+        );
+    }
+
+    private static byte[] readSecretFile(Path path) throws IOException {
+        byte[] secret = readRegularFile(path, true);
+        try {
+            Set<PosixFilePermission> permissions = Files.getPosixFilePermissions(path, LinkOption.NOFOLLOW_LINKS);
+            if (permissions.contains(PosixFilePermission.GROUP_READ)
+                    || permissions.contains(PosixFilePermission.GROUP_WRITE)
+                    || permissions.contains(PosixFilePermission.GROUP_EXECUTE)
+                    || permissions.contains(PosixFilePermission.OTHERS_READ)
+                    || permissions.contains(PosixFilePermission.OTHERS_WRITE)
+                    || permissions.contains(PosixFilePermission.OTHERS_EXECUTE)) {
+                throw new IOException("Passphrase file permissions must be 0600 or stricter: " + path);
+            }
+        } catch (UnsupportedOperationException e) {
+            // POSIX permissions are unavailable on this filesystem.
+        }
+        if (secret.length == 0) {
+            throw new IOException("Passphrase file is empty: " + path);
+        }
+        return secret;
+    }
+
+    private static byte[] readRegularFile(Path path, boolean rejectWritable) throws IOException {
+        if (Files.isSymbolicLink(path) || !Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS)) {
+            throw new IOException("Refusing non-regular or symbolic-link file: " + path);
+        }
+        if (rejectWritable) {
+            try {
+                Set<PosixFilePermission> permissions = Files.getPosixFilePermissions(path, LinkOption.NOFOLLOW_LINKS);
+                if (permissions.contains(PosixFilePermission.GROUP_WRITE)
+                        || permissions.contains(PosixFilePermission.OTHERS_WRITE)) {
+                    throw new IOException("Refusing group/other-writable file: " + path);
+                }
+            } catch (UnsupportedOperationException e) {
+                // POSIX permissions are unavailable on this filesystem.
+            }
+        }
+        return Files.readAllBytes(path);
+    }
+
+    private static byte[] trimNewlines(byte[] value) throws IOException {
+        int end = value.length;
+        while (end > 0 && (value[end - 1] == '\r' || value[end - 1] == '\n')) {
+            end--;
+        }
+        if (end == 0) {
+            throw new IOException("Passphrase file is empty");
+        }
+        return Arrays.copyOf(value, end);
+    }
+
+    private static String text(JsonNode node, String name, String defaultValue) {
+        JsonNode value = node.get(name);
+        return value == null || value.isNull() ? defaultValue : value.asText();
     }
 
     private static Path getDbScriptsDir(String configurationFile) {
@@ -290,142 +366,6 @@ public class ExtensionUtils {
                 );
             }
         }
-    }
-    
- // JSON 필드 안전 추출
-    private static String optText(JsonNode node, String field) {
-        return (node.hasNonNull(field) ? node.get(field).asText() : null);
-    }
-
-    // AES-256-CBC 복호화 (IV=파일 앞 16바이트, PKCS5Padding)
-    private static String decryptFileCBC(File file, byte[] dataKey) {
-        final int IV_SIZE = 16;
-        try (FileInputStream fis = new FileInputStream(file)) {
-            byte[] iv = new byte[IV_SIZE];
-            int n = fis.read(iv);
-            if (n != IV_SIZE) throw new IllegalStateException("IV 읽기 실패 또는 파일 손상: " + file);
-
-            byte[] enc = fis.readAllBytes();
-
-            SecretKeySpec keySpec = new SecretKeySpec(dataKey, "AES");
-            IvParameterSpec ivSpec = new IvParameterSpec(iv);
-
-            Cipher cipher = Cipher.getInstance("AES/CBC/PKCS5Padding");
-            cipher.init(Cipher.DECRYPT_MODE, keySpec, ivSpec);
-
-            byte[] plain = cipher.doFinal(enc);
-            return new String(plain, StandardCharsets.UTF_8);
-        } catch (Exception e) {
-            throw new RuntimeException("AES-256-CBC 파일 복호화 오류: " + file, e);
-        }
-    }
-
-    // AES-GCM(KEK)로 데이터키 복호화
-    private static byte[] decryptGCM(byte[] ciphertext, byte[] kek, byte[] nonce) {
-        try {
-            Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
-            GCMParameterSpec spec = new GCMParameterSpec(128, nonce);
-            cipher.init(Cipher.DECRYPT_MODE, new SecretKeySpec(kek, "AES"), spec);
-            return cipher.doFinal(ciphertext);
-        } catch (Exception e) {
-            throw new RuntimeException("AES-GCM 복호화 실패(데이터키)", e);
-        }
-    }
-
-    // PBKDF2-HMAC-SHA256 (KEK 도출)
-    private static byte[] deriveKek(byte[] passphrase, byte[] salt, int iterations, int outLen) {
-        try {
-            PBEKeySpec spec = new PBEKeySpec(
-                new String(passphrase, StandardCharsets.UTF_8).toCharArray(),
-                salt,
-                iterations,
-                outLen * 8
-            );
-            SecretKeyFactory skf = SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256");
-            return skf.generateSecret(spec).getEncoded();
-        } catch (Exception e) {
-            throw new RuntimeException("PBKDF2 KEK 도출 실패", e);
-        }
-    }
-
-    // MAC 패스프레이즈 획득(기본 라우트 우선, 폴백은 활성 NIC)
-    private static byte[] getMacPassphrase(String preferIface) {
-        try {
-            if (preferIface != null && !preferIface.isEmpty()) {
-                String mac = readMacByName(preferIface);
-                if (mac != null) return mac.getBytes(StandardCharsets.US_ASCII);
-            }
-            String def = detectDefaultIface();
-            if (def != null) {
-                String mac = readMacByName(def);
-                if (mac != null) return mac.getBytes(StandardCharsets.US_ASCII);
-            }
-            Enumeration<NetworkInterface> nis = NetworkInterface.getNetworkInterfaces();
-            while (nis.hasMoreElements()) {
-                NetworkInterface ni = nis.nextElement();
-                if (ni == null || ni.isLoopback() || ni.isVirtual() || !ni.isUp()) continue;
-                byte[] hw = ni.getHardwareAddress();
-                if (hw != null && hw.length == 6) {
-                    return toMacString(hw).getBytes(StandardCharsets.US_ASCII);
-                }
-            }
-        } catch (Exception ignore) {}
-        return null;
-    }
-
-    private static String readMacByName(String iface) {
-        try {
-            NetworkInterface ni = NetworkInterface.getByName(iface);
-            if (ni == null || !ni.isUp()) return null;
-            byte[] hw = ni.getHardwareAddress();
-            if (hw == null || hw.length != 6) return null;
-            return toMacString(hw);
-        } catch (Exception e) {
-            return null;
-        }
-    }
-
-    private static String toMacString(byte[] hw) {
-        StringBuilder sb = new StringBuilder();
-        for (int i = 0; i < hw.length; i++) {
-            if (i > 0) sb.append(':');
-            sb.append(String.format("%02x", hw[i]));
-        }
-        return sb.toString();
-    }
-
-    // 기본 라우트 NIC 감지(/proc/net/route)
-    private static String detectDefaultIface() {
-        File f = new File("/proc/net/route");
-        if (!f.exists()) return null;
-        try (BufferedReader br = new BufferedReader(new FileReader(f))) {
-            br.readLine(); // header skip
-            List<String[]> zeros = new ArrayList<>();
-            String line;
-            while ((line = br.readLine()) != null) {
-                String[] c = line.trim().split("\\s+");
-                if (c.length < 11) continue;
-                String iface = c[0];
-                String dest  = c[1];
-                String flags = c[3];
-                if (!"00000000".equals(dest)) continue;
-                zeros.add(c);
-                try {
-                    int fl = Integer.parseInt(flags, 16);
-                    if ((fl & 0x2) != 0) return iface; // 게이트웨이 플래그 우선
-                } catch (Exception ignore) {}
-            }
-            if (!zeros.isEmpty()) return zeros.get(0)[0];
-        } catch (Exception ignore) {}
-        return null;
-    }
-
-    // (pepper 추가 시 사용)
-    private static byte[] concat(byte[] a, byte[] b) {
-        byte[] out = new byte[a.length + b.length];
-        System.arraycopy(a, 0, out, 0, a.length);
-        System.arraycopy(b, 0, out, a.length, b.length);
-        return out;
     }
 
 }
