@@ -573,16 +573,19 @@ public class Authentication implements Observer {
                 complexity.getUsage()
             );
         }
-        // 3. 비밀번호에 사용자 ID 포함 여부 검사
-        if (response == null && newCredentials.toLowerCase().contains(user.getName().toLowerCase())) {
+        // A password must not be identical to the user ID (case-insensitive).
+        if (response == null && newCredentials.equalsIgnoreCase(user.getName())) {
              response = AuthResponse.negative(
                  Authn.AuthResult.GENERAL_ERROR,
                  user,
-                 "User ID cannot be included in the new password."
+                 "Password cannot be identical to the user ID."
              );
         }
-        // 4. 연속적인 문자나 숫자 패턴 검사 (예: 1234, abcd)
-        if (response == null && containsSequentialCharacters(newCredentials)) {
+        if (
+            response == null &&
+            settings.get(Schema.Settings.PASSWORD_REJECT_KEYBOARD_SEQUENCES, Boolean.class) &&
+            containsSequentialCharacters(newCredentials)
+        ) {
              response = AuthResponse.negative(
                  Authn.AuthResult.GENERAL_ERROR,
                  user,
@@ -591,7 +594,11 @@ public class Authentication implements Observer {
         }
 
         // 5. 특수문자 포함 여부 검사
-        if (response == null && !containsSpecialCharacter(newCredentials)) {
+        if (
+            response == null &&
+            settings.get(Schema.Settings.PASSWORD_REQUIRE_SPECIAL, Boolean.class) &&
+            !containsSpecialCharacter(newCredentials)
+        ) {
             response = AuthResponse.negative(
                  Authn.AuthResult.GENERAL_ERROR,
                  user,
@@ -600,7 +607,11 @@ public class Authentication implements Observer {
         }
 
 	// 6. 101 키보드 연속 문자 사용 여부 검사
-        if (response == null && containsKeyboardSequence(newCredentials)) {
+        if (
+            response == null &&
+            settings.get(Schema.Settings.PASSWORD_REJECT_KEYBOARD_SEQUENCES, Boolean.class) &&
+            containsKeyboardSequence(newCredentials)
+        ) {
             response = AuthResponse.negative(
                 Authn.AuthResult.GENERAL_ERROR,
                 user,
@@ -609,7 +620,11 @@ public class Authentication implements Observer {
         }
 
 	// 7. 동일한 문자 또는 패턴 반복 검사
-        if (response == null && containsRepeatedPattern(newCredentials)) {
+        if (
+            response == null &&
+            settings.get(Schema.Settings.PASSWORD_REJECT_REPEATED, Boolean.class) &&
+            containsRepeatedPattern(newCredentials)
+        ) {
             response = AuthResponse.negative(
             Authn.AuthResult.GENERAL_ERROR,
             user,
@@ -622,9 +637,21 @@ public class Authentication implements Observer {
             response = AuthResponse.negative(Authn.AuthResult.GENERAL_ERROR, user, "new password already used");
         }
         if (response == null) {
-            for (Schema.User.PasswordHistory oldPassword : user.getOldPasswords()) {
-                if (!user.getPassword().equals("") && EnvelopePBE.check(oldPassword.password, newCredentials)) {
+            long passwordHistoryCutoff = DateUtils.add(
+                System.currentTimeMillis(),
+                Calendar.DAY_OF_MONTH,
+                -settings.get(Schema.Settings.PASSWORD_HISTORY_DAYS, Integer.class)
+            );
+            List<Schema.User.PasswordHistory> oldPasswords = user.getOldPasswords();
+            int historyLimit = settings.get(Schema.Settings.PASSWORD_HISTORY_LIMIT, Integer.class);
+            for (int i = 0; i < oldPasswords.size(); i++) {
+                Schema.User.PasswordHistory oldPassword = oldPasswords.get(i);
+                if (
+                    (oldPassword.date >= passwordHistoryCutoff || i >= oldPasswords.size() - historyLimit) &&
+                    EnvelopePBE.check(oldPassword.password, newCredentials)
+                ) {
                     response = AuthResponse.negative(Authn.AuthResult.GENERAL_ERROR, user, "new password already used");
+                    break;
                 }
             }
         }
@@ -637,6 +664,10 @@ public class Authentication implements Observer {
     @Override
     public void update(Observable o, Object arg) {
         this.settings = (ExtMap)arg;
+        int passwordHistoryDays = settings.get(Schema.Settings.PASSWORD_HISTORY_DAYS, Integer.class);
+        if (passwordHistoryDays < 0 || passwordHistoryDays > 90) {
+            throw new IllegalArgumentException("PASSWORD_HISTORY_DAYS must be between 0 and 90");
+        }
         Matcher m = COMPLEXITY_PATTERN.matcher(settings.get(Schema.Settings.PASSWORD_COMPLEXITY, String.class));
         boolean ok = true;
         int expectedStart = 0;

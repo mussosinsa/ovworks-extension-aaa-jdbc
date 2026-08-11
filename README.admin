@@ -96,6 +96,29 @@ following steps:
    permissions to users/groups defined in your PROFILE
 
 
+Password policy
+---------------
+
+The default policy requires a password of at least twelve characters containing
+an uppercase letter, a lowercase letter, a number, and a special character.
+It also rejects a password identical to the user name, repeated patterns, and
+four-character alphabetic, numeric, or adjacent-keyboard sequences (for
+example, `1234`, `qwer`, and `asdf`).
+
+The optional checks can be selected by updating the corresponding row in the
+profile database's `settings` table:
+
+* `PASSWORD_REQUIRE_SPECIAL`
+* `PASSWORD_REJECT_REPEATED`
+* `PASSWORD_REJECT_KEYBOARD_SEQUENCES`
+* `PASSWORD_HISTORY_LIMIT`
+* `PASSWORD_HISTORY_DAYS`
+
+Set a Boolean option to `FALSE` or a numeric option to `0` to disable it.
+`PASSWORD_HISTORY_DAYS` is configurable from 0 through 90 days. Changes take
+effect at the next configured settings refresh or after restarting the engine.
+
+
 
 IV. Upgrading 'internal' profile
 
@@ -137,4 +160,3 @@ To upgrade custom aaa-jdbc profiles please do following steps:
 
      EL6:          service ovirt-engine start
      EL7/Fedora:   systemctl start ovirt-engine
-

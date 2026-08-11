@@ -165,6 +165,10 @@ public class Schema {
          * Authentication related
          */
         public static final ExtKey PASSWORD_HISTORY_LIMIT = new ExtKey("", Integer.class, "e843bc2a-0878-4b6f-9be3-32e83169fb7c");
+        public static final ExtKey PASSWORD_HISTORY_DAYS = new ExtKey("", Integer.class, "77cd7071-1d6d-48ba-ac07-ddf50d03329d");
+        public static final ExtKey PASSWORD_REJECT_REPEATED = new ExtKey("", Boolean.class, "fd5e8737-a93f-4765-a229-6ecf64d3b91d");
+        public static final ExtKey PASSWORD_REJECT_KEYBOARD_SEQUENCES = new ExtKey("", Boolean.class, "b5b1937e-4473-4333-9639-26f10dc4d9c8");
+        public static final ExtKey PASSWORD_REQUIRE_SPECIAL = new ExtKey("", Boolean.class, "eb4c52e7-0e8a-45f5-9825-61f9b9ee029b");
         public static final ExtKey LOCK_MINUTES = new ExtKey("", Integer.class, "78b5138a-d52b-464d-a2a7-5fed55bdf7b3");
         public static final ExtKey PRESENT_WELCOME_MESSAGE = new ExtKey("", Boolean.class, "0ae5affd-15e5-4bb1-9910-f091b64b7197");
         public static final ExtKey MESSAGE_SEPARATOR = new ExtKey("", String.class, "ecf6d62a-10f8-4fad-b401-75c9d0788955");
@@ -442,7 +446,8 @@ public class Schema {
                     user.oldPasswords = new TreeSet<>(new Comparator<PasswordHistory>() {
                         @Override
                         public int compare(PasswordHistory o1, PasswordHistory o2) {
-                            return Long.compare(o1.date, o2.date);
+                            int dateComparison = Long.compare(o1.date, o2.date);
+                            return dateComparison != 0 ? dateComparison : o1.password.compareTo(o2.password);
                         }
                     });
                     do {
@@ -456,7 +461,8 @@ public class Schema {
                         if (passwordHistory != null) {
                             user.addOldPassword(
                                 passwordHistory,
-                                context.get(Settings.PASSWORD_HISTORY_LIMIT, Integer.class)
+                                context.get(Settings.PASSWORD_HISTORY_LIMIT, Integer.class),
+                                context.get(Settings.PASSWORD_HISTORY_DAYS, Integer.class)
                             );
                         }
 
@@ -589,9 +595,10 @@ public class Schema {
             return validFrom;
         }
 
-        public void addOldPassword(PasswordHistory passwordHistory, int passwordHistoryLimit) {
+        public void addOldPassword(PasswordHistory passwordHistory, int passwordHistoryLimit, int passwordHistoryDays) {
             oldPasswords.add(passwordHistory);
-            if (oldPasswords.size() >= passwordHistoryLimit) {
+            long cutoff = DateUtils.add(System.currentTimeMillis(), Calendar.DAY_OF_MONTH, -passwordHistoryDays);
+            while (oldPasswords.size() > passwordHistoryLimit && oldPasswords.first().date < cutoff) {
                 oldPasswords.remove(oldPasswords.first());
             }
         }
@@ -693,6 +700,10 @@ public class Schema {
     static {
         for (ExtKey key: Arrays.asList(
             Settings.PASSWORD_HISTORY_LIMIT,
+            Settings.PASSWORD_HISTORY_DAYS,
+            Settings.PASSWORD_REJECT_REPEATED,
+            Settings.PASSWORD_REJECT_KEYBOARD_SEQUENCES,
+            Settings.PASSWORD_REQUIRE_SPECIAL,
             Settings.LOCK_MINUTES,
             Settings.PRESENT_WELCOME_MESSAGE,
             Settings.MESSAGE_SEPARATOR,
