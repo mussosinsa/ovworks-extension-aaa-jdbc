@@ -583,7 +583,11 @@ public class Authentication implements Observer {
         }
         if (
             response == null &&
-            settings.get(Schema.Settings.PASSWORD_REJECT_KEYBOARD_SEQUENCES, Boolean.class) &&
+            settings.get(
+                Schema.Settings.PASSWORD_REJECT_KEYBOARD_SEQUENCES,
+                Boolean.class,
+                Schema.Settings.DEFAULT_PASSWORD_POLICY_OPTION
+            ) &&
             containsSequentialCharacters(newCredentials)
         ) {
              response = AuthResponse.negative(
@@ -596,7 +600,11 @@ public class Authentication implements Observer {
         // 5. 특수문자 포함 여부 검사
         if (
             response == null &&
-            settings.get(Schema.Settings.PASSWORD_REQUIRE_SPECIAL, Boolean.class) &&
+            settings.get(
+                Schema.Settings.PASSWORD_REQUIRE_SPECIAL,
+                Boolean.class,
+                Schema.Settings.DEFAULT_PASSWORD_POLICY_OPTION
+            ) &&
             !containsSpecialCharacter(newCredentials)
         ) {
             response = AuthResponse.negative(
@@ -609,7 +617,11 @@ public class Authentication implements Observer {
 	// 6. 101 키보드 연속 문자 사용 여부 검사
         if (
             response == null &&
-            settings.get(Schema.Settings.PASSWORD_REJECT_KEYBOARD_SEQUENCES, Boolean.class) &&
+            settings.get(
+                Schema.Settings.PASSWORD_REJECT_KEYBOARD_SEQUENCES,
+                Boolean.class,
+                Schema.Settings.DEFAULT_PASSWORD_POLICY_OPTION
+            ) &&
             containsKeyboardSequence(newCredentials)
         ) {
             response = AuthResponse.negative(
@@ -622,7 +634,11 @@ public class Authentication implements Observer {
 	// 7. 동일한 문자 또는 패턴 반복 검사
         if (
             response == null &&
-            settings.get(Schema.Settings.PASSWORD_REJECT_REPEATED, Boolean.class) &&
+            settings.get(
+                Schema.Settings.PASSWORD_REJECT_REPEATED,
+                Boolean.class,
+                Schema.Settings.DEFAULT_PASSWORD_POLICY_OPTION
+            ) &&
             containsRepeatedPattern(newCredentials)
         ) {
             response = AuthResponse.negative(
@@ -640,7 +656,11 @@ public class Authentication implements Observer {
             long passwordHistoryCutoff = DateUtils.add(
                 System.currentTimeMillis(),
                 Calendar.DAY_OF_MONTH,
-                -settings.get(Schema.Settings.PASSWORD_HISTORY_DAYS, Integer.class)
+                -settings.get(
+                    Schema.Settings.PASSWORD_HISTORY_DAYS,
+                    Integer.class,
+                    Schema.Settings.DEFAULT_PASSWORD_HISTORY_DAYS
+                )
             );
             List<Schema.User.PasswordHistory> oldPasswords = user.getOldPasswords();
             int historyLimit = settings.get(Schema.Settings.PASSWORD_HISTORY_LIMIT, Integer.class);
@@ -664,7 +684,11 @@ public class Authentication implements Observer {
     @Override
     public void update(Observable o, Object arg) {
         this.settings = (ExtMap)arg;
-        int passwordHistoryDays = settings.get(Schema.Settings.PASSWORD_HISTORY_DAYS, Integer.class);
+        int passwordHistoryDays = settings.get(
+            Schema.Settings.PASSWORD_HISTORY_DAYS,
+            Integer.class,
+            Schema.Settings.DEFAULT_PASSWORD_HISTORY_DAYS
+        );
         if (passwordHistoryDays < 0 || passwordHistoryDays > 90) {
             throw new IllegalArgumentException("PASSWORD_HISTORY_DAYS must be between 0 and 90");
         }

@@ -161,6 +161,9 @@ public class Schema {
 
     /** Note: names of loaded keys are retrieved from the database. */
     public static class Settings {
+        public static final int DEFAULT_PASSWORD_HISTORY_DAYS = 90;
+        public static final boolean DEFAULT_PASSWORD_POLICY_OPTION = true;
+
         /**
          * Authentication related
          */
@@ -462,7 +465,11 @@ public class Schema {
                             user.addOldPassword(
                                 passwordHistory,
                                 context.get(Settings.PASSWORD_HISTORY_LIMIT, Integer.class),
-                                context.get(Settings.PASSWORD_HISTORY_DAYS, Integer.class)
+                                context.get(
+                                    Settings.PASSWORD_HISTORY_DAYS,
+                                    Integer.class,
+                                    Settings.DEFAULT_PASSWORD_HISTORY_DAYS
+                                )
                             );
                         }
 
