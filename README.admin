@@ -119,6 +119,25 @@ Set a Boolean option to `FALSE` or a numeric option to `0` to disable it.
 effect at the next configured settings refresh or after restarting the engine.
 
 
+Vault Transit protected passphrases
+-----------------------------------
+
+The encryptor passphrase selected by `secret_file` may use the authenticated
+`OVVLT001` envelope. Its 256-bit data-encryption key is wrapped by a
+non-exportable Vault Transit key, while AES-256-GCM protects the passphrase and
+authenticates the envelope metadata. Configure `vault_transit` in
+`/etc/ovirt-engine/encryptor/config.json` with `enabled`, `address`, `mount`,
+`key_name`, `token_file`, `ca_cert`, and `timeout`. The token and configuration
+must not be group/other writable, and the token needs only `update` on the
+configured `transit/decrypt/<key_name>` endpoint.
+
+HTTPS is required. Plain HTTP is accepted only for a loopback address when
+`allow_plaintext_loopback` is explicitly enabled for development. Reading an
+`OVVLT001` passphrase fails closed when Vault is unavailable, sealed, rejects
+the token, or returns an invalid key, and when any envelope metadata or
+ciphertext authentication fails.
+
+
 
 IV. Upgrading 'internal' profile
 
