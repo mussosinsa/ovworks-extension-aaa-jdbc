@@ -122,8 +122,9 @@ effect at the next configured settings refresh or after restarting the engine.
 Vault Transit protected passphrases
 -----------------------------------
 
-The encryptor passphrase selected by `secret_file` may use the authenticated
-`OVVLT001` envelope. Its 256-bit data-encryption key is wrapped by a
+Encrypted database configuration files and the encryptor passphrase selected
+by `secret_file` may use the authenticated `OVVLT001` envelope. Its 256-bit
+data-encryption key is wrapped by a
 non-exportable Vault Transit key, while AES-256-GCM protects the passphrase and
 authenticates the envelope metadata. Configure `vault_transit` in
 `/etc/ovirt-engine/encryptor/config.json` with `enabled`, `address`, `mount`,

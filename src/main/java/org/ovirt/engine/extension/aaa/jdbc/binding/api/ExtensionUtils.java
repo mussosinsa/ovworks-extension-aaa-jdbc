@@ -96,14 +96,17 @@ public class ExtensionUtils {
         Base.ContextKeys.BUILD_INTERFACE_VERSION, Base.INTERFACE_VERSION_CURRENT
     );
 
-    /** Load a properties file, transparently decrypting the OVENC001 format. */
+    /** Load a properties file, transparently decrypting OVENC001 and OVVLT001 formats. */
     public static Properties loadPropertiesFromFile(String filename) throws IOException {
         return loadPropertiesFromFile(Paths.get(filename), ENCRYPTOR_CONFIG);
     }
 
     static Properties loadPropertiesFromFile(Path filename, Path encryptorConfig) throws IOException {
         byte[] content = readRegularFile(filename, false);
-        if (startsWithMagic(content)) {
+        if (startsWith(content, VAULT_MAGIC)) {
+            JsonNode config = loadEncryptorConfig(encryptorConfig);
+            content = decryptOvvlt001(content, vaultClient(config));
+        } else if (startsWithMagic(content)) {
             JsonNode config = loadEncryptorConfig(encryptorConfig);
             byte[] passphrase = obtainPassphrase(config);
             try {

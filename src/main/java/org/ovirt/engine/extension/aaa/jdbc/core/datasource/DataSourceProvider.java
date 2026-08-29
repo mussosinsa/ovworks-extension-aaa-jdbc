@@ -4,6 +4,7 @@ import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
 import java.sql.DriverManager;
+import java.util.Arrays;
 import java.util.Properties;
 
 import javax.naming.InitialContext;
@@ -51,6 +52,7 @@ public class DataSourceProvider {
         if (!StringUtils.isEmpty(datasourceJndi)) {
             ds = getDataSourceFromJNDI(datasourceJndi);
         } else {
+            requireProperties(configuration, JDBC_DRIVER, JDBC_URL, DATABASE_USER, DATABASE_PASSWORD);
             ds = createDataSource(
                     configuration.getProperty(JDBC_DRIVER),
                     configuration.getProperty(JDBC_URL),
@@ -59,6 +61,18 @@ public class DataSourceProvider {
             );
         }
         dataSource = new SchemaAwareDataSource(ds, schemaName);
+    }
+
+    private static void requireProperties(Properties configuration, String... names) {
+        for (String name : names) {
+            if (StringUtils.isBlank(configuration.getProperty(name))) {
+                throw new IllegalArgumentException(
+                    "Missing required datasource property '" + name + "'. " +
+                    "The database configuration may be empty, malformed, or not decrypted. Required properties: " +
+                    Arrays.toString(names)
+                );
+            }
+        }
     }
 
     private DataSource createDataSource(
