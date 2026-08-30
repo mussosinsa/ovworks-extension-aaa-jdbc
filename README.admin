@@ -138,6 +138,11 @@ HTTPS is required. Plain HTTP is accepted only for a loopback address when
 the token, or returns an invalid key, and when any envelope metadata or
 ciphertext authentication fails.
 
+The packaged JDBC module loads PostgreSQL JDBC together with its
+`ongres-scram` and `ongres-stringprep` dependencies. This is required when the
+PostgreSQL role uses SCRAM-SHA-256 authentication; omitting those dependencies
+causes the driver to fail before it can authenticate.
+
 
 
 IV. Upgrading 'internal' profile

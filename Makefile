@@ -121,8 +121,16 @@ install-packaging-files: \
 	install -m 644 README.developer "$(DESTDIR)$(DOC_DIR)/$(PACKAGE_NAME)/README.developer"
 
 install-layout: \
-		install-packaging-files \
-		$(NULL)
+	install-packaging-files \
+	$(NULL)
+	ln -sf /usr/share/java/postgresql-jdbc.jar \
+		"$(DESTDIR)$(DATA_DIR)/modules/org/postgresql/scram/main/postgresql-jdbc.jar"
+	ln -sf /usr/share/java/ongres-scram/scram-client.jar \
+		"$(DESTDIR)$(DATA_DIR)/modules/org/postgresql/scram/main/scram-client.jar"
+	ln -sf /usr/share/java/ongres-scram/scram-common.jar \
+		"$(DESTDIR)$(DATA_DIR)/modules/org/postgresql/scram/main/scram-common.jar"
+	ln -sf /usr/share/java/ongres-stringprep/stringprep.jar \
+		"$(DESTDIR)$(DATA_DIR)/modules/org/postgresql/scram/main/stringprep.jar"
 	install -d -m 755 "$(DESTDIR)$(BIN_DIR)"
 	ln -sf "$(DATA_DIR)/bin/ovirt-aaa-jdbc-tool.sh" "$(DESTDIR)$(BIN_DIR)/ovirt-aaa-jdbc-tool"
 	ln -sf "$(JAVA_DIR)/$(PACKAGE_NAME)/$(PACKAGE_NAME).jar" "$(DESTDIR)$(DATA_DIR)/modules/org/ovirt/engine/extension/aaa/jdbc/main/$(PACKAGE_NAME).jar"
@@ -153,5 +161,4 @@ install-dev:	\
 		DEV_FLIST=tmp.dev.flist \
 		$(NULL)
 	cp tmp.dev.flist "$(DESTDIR)$(PREFIX)/dev.$(PACKAGE_NAME).flist"
-
 

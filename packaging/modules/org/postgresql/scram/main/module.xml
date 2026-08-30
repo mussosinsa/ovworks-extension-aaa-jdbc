@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Keep the PostgreSQL driver and its SCRAM implementation in one classloader. -->
+<module xmlns="urn:jboss:module:1.1" name="org.postgresql.scram">
+    <resources>
+        <resource-root path="postgresql-jdbc.jar"/>
+        <resource-root path="scram-client.jar"/>
+        <resource-root path="scram-common.jar"/>
+        <resource-root path="stringprep.jar"/>
+    </resources>
+    <dependencies>
+        <module name="javax.api"/>
+    </dependencies>
+</module>
