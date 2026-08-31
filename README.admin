@@ -138,6 +138,14 @@ HTTPS is required. Plain HTTP is accepted only for a loopback address when
 the token, or returns an invalid key, and when any envelope metadata or
 ciphertext authentication fails.
 
+`ovirt-aaa-jdbc-tool` skips `engine-prolog.sh` when it detects an encrypted
+database entry in `engine.conf.d`. Such files are binary envelopes rather than
+shell fragments; sourcing one would fail before the Java decryptor can run. In
+that case the launcher constructs the standard oVirt module path directly and
+accepts `JAVA_HOME`, `JBOSS_HOME`, `ENGINE_USR`, `ENGINE_ETC`, and
+`ENGINE_JAVA_MODULEPATH` overrides. Plaintext installations retain the existing
+`engine-prolog.sh` behavior.
+
 The packaged JDBC module loads PostgreSQL JDBC together with its
 `ongres-scram` and `ongres-stringprep` dependencies. This is required when the
 PostgreSQL role uses SCRAM-SHA-256 authentication; omitting those dependencies
