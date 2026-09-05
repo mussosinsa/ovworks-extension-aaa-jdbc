@@ -118,6 +118,28 @@ Set a Boolean option to `FALSE` or a numeric option to `0` to disable it.
 `PASSWORD_HISTORY_DAYS` is configurable from 0 through 90 days. Changes take
 effect at the next configured settings refresh or after restarting the engine.
 
+`user add` creates a disabled-password account; assign its initial password
+with `user password-reset`. Unless the explicit administrative `--force` or
+pre-encrypted import path is used, that command applies the same policy as a
+user-initiated password change. The default policy maps to the type (2)
+requirements as follows:
+
+* `MIN_LENGTH=12` exceeds the mandatory six-character minimum.
+* `PASSWORD_COMPLEXITY` requires at least one uppercase letter, lowercase
+  letter, and digit. Set an individual group's `min` to `-1` to disable it.
+* `PASSWORD_REQUIRE_SPECIAL` controls the optional special-character check.
+* Equality with the user ID is always rejected, case-insensitively.
+* `PASSWORD_REJECT_REPEATED` rejects three or more adjacent occurrences of the
+  same letter or digit.
+* `PASSWORD_REJECT_KEYBOARD_SEQUENCES` rejects four or more horizontal keyboard
+  characters, including `qwer`, `asdf`, and `1234`, in either direction and
+  without case sensitivity. It also rejects four alphabetic or numeric code
+  points in ascending or descending order, such as `abcd` and `4321`.
+* `PASSWORD_HISTORY_LIMIT` protects the configured number of previous
+  passwords, while `PASSWORD_HISTORY_DAYS` protects every password used in the
+  configured period. Set both to `0` to disable previous-password reuse checks;
+  the day setting cannot exceed 90.
+
 
 Vault Transit protected passphrases
 -----------------------------------

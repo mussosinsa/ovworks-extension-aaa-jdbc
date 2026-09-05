@@ -4,6 +4,7 @@ import java.io.IOException;
 import java.security.GeneralSecurityException;
 import java.sql.SQLException;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Calendar;
 import java.util.Collections;
 import java.util.List;
@@ -427,58 +428,32 @@ public class Authentication implements Observer {
     }
 
 
-    // 동일한 문자 반복 패턴 감지 함수
-    private boolean containsRepeatedPattern(String password) {
-    // 1. 동일한 문자가 3번 이상 연속되는 경우 (예: aaa, 111, $$$)
-        Pattern repeatedCharPattern = Pattern.compile("(.)\\1{2,}");
-        Matcher matcher1 = repeatedCharPattern.matcher(password);
-        if (matcher1.find()) {
-            return true; // 동일 문자가 3번 이상 반복됨
+    static boolean containsRepeatedPattern(String password) {
+        return Pattern.compile("([A-Za-z0-9])\\1{2,}", Pattern.CASE_INSENSITIVE)
+            .matcher(password)
+            .find();
+    }
+
+    static boolean containsSequentialCharacters(String password) {
+        String normalized = password.toLowerCase();
+        for (int i = 0; i <= normalized.length() - 4; i++) {
+            String candidate = normalized.substring(i, i + 4);
+            boolean letters = candidate.chars().allMatch(character -> character >= 'a' && character <= 'z');
+            boolean digits = candidate.chars().allMatch(character -> character >= '0' && character <= '9');
+            if ((letters || digits) && (isOrdered(candidate, 1) || isOrdered(candidate, -1))) {
+                return true;
+            }
         }
+        return false;
+    }
 
-        // 2. 반복된 패턴 감지 (예: 123123, ababab, xyxyxy)
-        Pattern repeatingPattern = Pattern.compile("(..+)\\1{1,}");
-        Matcher matcher2 = repeatingPattern.matcher(password);
-        if (matcher2.find()) {
-            return true; // 동일한 패턴이 반복됨
-        }  
-
-        return false; // 문제 없음
-    }  
-
-    // 연속된 문자 또는 숫자 패턴이 있는지 확인하는 메서드
-    private boolean containsSequentialCharacters(String password) {
-        int sequenceLength = 4; // 연속된 문자 또는 숫자의 길이 (예: 1234 또는 abcd)
-
-        // 1. 숫자에 대한 검사
-        for (int i = 0; i < password.length() - sequenceLength + 1; i++) {
-            boolean isSequential = true;
-            for (int j = 1; j < sequenceLength; j++) {
-                if (password.charAt(i + j) != password.charAt(i) + j) {
-                   isSequential = false;
-                   break;
-                }
+    private static boolean isOrdered(String candidate, int step) {
+        for (int i = 1; i < candidate.length(); i++) {
+            if (candidate.charAt(i) != candidate.charAt(i - 1) + step) {
+                return false;
             }
-            if (isSequential) {
-                return true; // 연속적인 숫자나 문자가 발견됨
-            }
-         }
-
-         // 2. 역순 숫자에 대한 검사 (예: 4321)
-         for (int i = 0; i < password.length() - sequenceLength + 1; i++) {
-            boolean isReverseSequential = true;
-            for (int j = 1; j < sequenceLength; j++) {
-                if (password.charAt(i + j) != password.charAt(i) - j) {
-                   isReverseSequential = false;
-                   break;
-                }
-            }
-            if (isReverseSequential) {
-               return true; // 역순 연속적인 숫자나 문자가 발견됨
-            }
-         }
-
-         return false; // 연속적인 패턴이 없음
+        }
+        return true;
     }
 
     public AuthResponse checkCredChange(
@@ -499,57 +474,24 @@ public class Authentication implements Observer {
         return checkCredChange(user, newCredentials);
     }
    
-    // 특수문자가 포함되어 있는지 확인하는 메서드
-    private boolean containsSpecialCharacter(String password) {
+    static boolean containsSpecialCharacter(String password) {
          Pattern specialCharPattern = Pattern.compile("[!@#$%^&*()_+\\-=\\[\\]{};':\"\\\\|,.<>\\/?]+");
          Matcher matcher = specialCharPattern.matcher(password);
          return matcher.find();
     }
 
-    // 101 키보드의 연속된 문자열 패턴 검사
-    private boolean containsKeyboardSequence(String password) {
-    
-         String val_con0 = "~!@#$%^&*()_+";
-         String val_con1 = "1234567890-";
-         String val_con2 = "QWERTYUIOP[]\\";
-         String val_con3 = "ASDFGHJKL;'\"";
-         String val_con4 = "ZXCVBNM<>?";
-         String val_con5 = "qwertyuiop[]{}";
-         String val_con6 = "asdfghjkl;'";
-         String val_con7 = "zxcvbnm,./";
-
-         ArrayList<String> pwArr = new ArrayList<String>();
-         pwArr.add(val_con0);
-         pwArr.add(val_con1);
-         pwArr.add(val_con2);
-         pwArr.add(val_con3);
-         pwArr.add(val_con4);
-         pwArr.add(val_con5);
-         pwArr.add(val_con6);
-         pwArr.add(val_con7);
-         pwArr.add(new StringBuilder(val_con0).reverse().toString());
-         pwArr.add(new StringBuilder(val_con1).reverse().toString());
-         pwArr.add(new StringBuilder(val_con2).reverse().toString());
-         pwArr.add(new StringBuilder(val_con3).reverse().toString());
-         pwArr.add(new StringBuilder(val_con4).reverse().toString());
-         pwArr.add(new StringBuilder(val_con5).reverse().toString());
-         pwArr.add(new StringBuilder(val_con6).reverse().toString());
-         pwArr.add(new StringBuilder(val_con7).reverse().toString());
-
-         String checkItem = "";
-
-         // 자판 배열상 연속된 4자리 체크
-         for (int i = 0; i < password.length() - 3; i++) {
-             checkItem = password.charAt(i) + "" + password.charAt(i+1) + "" + password.charAt(i+2) + "" + password.charAt(i+3) + "";
-
-             for (int j = 0; j < pwArr.size(); j++) {
-                 if (pwArr.get(j).indexOf(checkItem) != -1) {
-                     return true;
-                 }
-             }
-         }
-
-        return false; // 키보드 연속 패턴 없음
+    static boolean containsKeyboardSequence(String password) {
+        String normalized = password.toLowerCase();
+        for (String row : Arrays.asList("1234567890", "qwertyuiop", "asdfghjkl", "zxcvbnm")) {
+            String reverse = new StringBuilder(row).reverse().toString();
+            for (int i = 0; i <= normalized.length() - 4; i++) {
+                String candidate = normalized.substring(i, i + 4);
+                if (row.contains(candidate) || reverse.contains(candidate)) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
 
