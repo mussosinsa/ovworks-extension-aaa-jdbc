@@ -134,7 +134,7 @@ public class Schema {
         public static final ExtKey NOPASS = new ExtKey("CATALOG_NOPASSWD", Boolean.class, "dc85f1d8-0933-4f15-b037-ef4007229436");
         public static final ExtKey FORCE_PASSWORD = new ExtKey("CATALOG_FORCE_PASSWORD", Boolean.class, "9b187ad5-b403-4412-bf68-debc7fcc17a6");
         public static final ExtKey DISABLED = new ExtKey("CATALOG_DISABLED", Boolean.class, "7a5d77c6-f831-400b-bc8e-b9d8ea286408");
-        /** unlock_time = value,  consecutive_failures = 0 */
+        /** unlock_time = value, consecutive_failures = 0; manual unlock also clears failed login history */
         public static final ExtKey UNLOCK_TIME = new ExtKey("CATALOG_UNLOCK_TIME", Long.class, "7b1042a6-35ea-4108-8cc4-2ed142ba002f");
         public static final ExtKey LOCKED = new ExtKey("CATALOG_LOCKED", Boolean.class, "df080800-6460-41ad-a3d4-eec98cf1c7d0");
         /**  last_successful_login = value, consecutive_failures = 0 */
@@ -951,6 +951,10 @@ public class Schema {
             if (userKeys.containsKey(UserKeys.UNLOCK_TIME)) {
                 users.setTimestamp("unlock_time", userKeys.get(UserKeys.UNLOCK_TIME, Long.class));
             }
+            boolean manualUnlock = userKeys.containsKey(UserKeys.UNLOCK_TIME) && isManualUnlock(
+                userKeys.get(UserKeys.UNLOCK_TIME, Long.class),
+                System.currentTimeMillis()
+            );
             if (userKeys.containsKey(UserKeys.SUCCESSFUL_LOGIN)) {
                 users.setTimestamp("last_successful_login", userKeys.get(UserKeys.SUCCESSFUL_LOGIN, Long.class));
             }
@@ -993,6 +997,9 @@ public class Schema {
             }
             if (op == Sql.ModificationTypes.UPDATE && userKeys.containsKey(UserKeys.UNSUCCESSFUL_LOGIN)) {
                 upsertFailedLoginRecord(id, userKeys, conn);
+            }
+            if (op == Sql.ModificationTypes.UPDATE && manualUnlock) {
+                deleteFailedLoginRecords(id, conn);
             }
             if (op == Sql.ModificationTypes.UPDATE && userKeys.containsKey(SharedKeys.ADD_GROUP)) {
                 updateGroupMembership(id, userKeys.get(SharedKeys.ADD_GROUP, String.class), conn, true, true);
@@ -1180,6 +1187,18 @@ public class Schema {
                 ).asSql()
             ).execute(conn, false);
         }
+    }
+
+    private static void deleteFailedLoginRecords(Integer id, Connection conn) throws SQLException {
+        new Sql.Modification(
+            new Sql.Template(Sql.ModificationTypes.DELETE, "failed_logins")
+                .where(Formatter.format("user_id = {}", id))
+                .asSql()
+        ).execute(conn, false);
+    }
+
+    static boolean isManualUnlock(long unlockTime, long currentTime) {
+        return unlockTime <= currentTime;
     }
 
     private static void InsertPassHistoryRecord(Integer id, ExtMap input, Connection conn)

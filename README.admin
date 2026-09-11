@@ -141,6 +141,21 @@ requirements as follows:
   the day setting cannot exceed 90.
 
 
+Account unlock policy
+---------------------
+
+`user unlock` starts the account with a clean authentication-failure state: it
+sets the unlock time, resets `consecutive_failures`, and deletes that user's
+rows from `failed_logins` in the same database transaction. Setting a future
+unlock time while automatically locking an account does not delete interval
+history, so an expired lock cannot be used to evade `MAX_FAILURES_PER_INTERVAL`.
+
+Do not disable or raise `MAX_FAILURES_PER_INTERVAL` merely to recover a locked
+account. Use `user unlock` instead. The secure defaults retain 20 failures per
+24-hour interval and a 60-minute lock; weakening the interval limit can permit
+substantially more password guesses.
+
+
 Vault Transit protected passphrases
 -----------------------------------
 
