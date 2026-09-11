@@ -41,7 +41,10 @@ Requires:	apache-commons-codec
 Requires:	apache-commons-lang
 Requires:	jackson-core
 Requires:	jackson-databind
+Requires:	ongres-scram
+Requires:	ongres-stringprep
 Requires:	ovirt-engine-extensions-api
+Requires:	postgresql-jdbc
 Requires:	slf4j
 Requires:	slf4j-jdk14
 
@@ -146,4 +149,3 @@ make %{make_common_opts} install
 
 * Tue Oct 06 2015 Martin Perina <mperina@redhat.com> 1.0.0-1
 - Initial release
-

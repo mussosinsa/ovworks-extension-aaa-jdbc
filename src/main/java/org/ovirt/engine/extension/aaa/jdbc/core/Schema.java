@@ -134,13 +134,26 @@ public class Schema {
         public static final ExtKey NOPASS = new ExtKey("CATALOG_NOPASSWD", Boolean.class, "dc85f1d8-0933-4f15-b037-ef4007229436");
         public static final ExtKey FORCE_PASSWORD = new ExtKey("CATALOG_FORCE_PASSWORD", Boolean.class, "9b187ad5-b403-4412-bf68-debc7fcc17a6");
         public static final ExtKey DISABLED = new ExtKey("CATALOG_DISABLED", Boolean.class, "7a5d77c6-f831-400b-bc8e-b9d8ea286408");
-        /** unlock_time = value,  consecutive_failures = 0 */
+        /** unlock_time = value, consecutive_failures = 0; manual unlock also clears failed login history */
         public static final ExtKey UNLOCK_TIME = new ExtKey("CATALOG_UNLOCK_TIME", Long.class, "7b1042a6-35ea-4108-8cc4-2ed142ba002f");
         public static final ExtKey LOCKED = new ExtKey("CATALOG_LOCKED", Boolean.class, "df080800-6460-41ad-a3d4-eec98cf1c7d0");
         /**  last_successful_login = value, consecutive_failures = 0 */
         public static final ExtKey SUCCESSFUL_LOGIN = new ExtKey("CATALOG_SUCCESSFUL_LOGIN", Long.class, "338117a2-4eec-4aca-9dd1-9bcbe95600f2");
         /**  last_unsuccessful_login = value, consecutive_failures++, insert a failed_login record */
         public static final ExtKey UNSUCCESSFUL_LOGIN = new ExtKey("CATALOG_SUCCESSFUL_LOGIN", Long.class, "c10a40f8-5fed-4908-a27e-ec9b0ae83324");
+        /**
+         * consecutive_failures = 0 and the failed_login records are deleted.
+         *
+         * <p>Set by a caller that knows the failures no longer stand for anything - a password
+         * change that went through, say, where the user has just proved they hold the account.
+         * Leaving the records would let the interval rule (MAX_FAILURES_PER_INTERVAL over
+         * INTERVAL_HOURS) lock the account over attempts the change already answered for.</p>
+         *
+         * <p>This is said rather than inferred. A manual unlock can be told apart by the
+         * unlock_time it writes, since a lock writes one in the future; a password change writes
+         * no unlock_time at all and there is nothing to read it from.</p>
+         */
+        public static final ExtKey CLEAR_FAILURES = new ExtKey("CATALOG_CLEAR_FAILURES", Boolean.class, "0a4a4c4c-3e5e-4cf1-9d2b-6f6a2f6b4d21");
     }
 
     public static class GroupIdentifiers {
@@ -161,10 +174,17 @@ public class Schema {
 
     /** Note: names of loaded keys are retrieved from the database. */
     public static class Settings {
+        public static final int DEFAULT_PASSWORD_HISTORY_DAYS = 90;
+        public static final boolean DEFAULT_PASSWORD_POLICY_OPTION = true;
+
         /**
          * Authentication related
          */
         public static final ExtKey PASSWORD_HISTORY_LIMIT = new ExtKey("", Integer.class, "e843bc2a-0878-4b6f-9be3-32e83169fb7c");
+        public static final ExtKey PASSWORD_HISTORY_DAYS = new ExtKey("", Integer.class, "77cd7071-1d6d-48ba-ac07-ddf50d03329d");
+        public static final ExtKey PASSWORD_REJECT_REPEATED = new ExtKey("", Boolean.class, "fd5e8737-a93f-4765-a229-6ecf64d3b91d");
+        public static final ExtKey PASSWORD_REJECT_KEYBOARD_SEQUENCES = new ExtKey("", Boolean.class, "b5b1937e-4473-4333-9639-26f10dc4d9c8");
+        public static final ExtKey PASSWORD_REQUIRE_SPECIAL = new ExtKey("", Boolean.class, "eb4c52e7-0e8a-45f5-9825-61f9b9ee029b");
         public static final ExtKey LOCK_MINUTES = new ExtKey("", Integer.class, "78b5138a-d52b-464d-a2a7-5fed55bdf7b3");
         public static final ExtKey PRESENT_WELCOME_MESSAGE = new ExtKey("", Boolean.class, "0ae5affd-15e5-4bb1-9910-f091b64b7197");
         public static final ExtKey MESSAGE_SEPARATOR = new ExtKey("", String.class, "ecf6d62a-10f8-4fad-b401-75c9d0788955");
@@ -442,7 +462,8 @@ public class Schema {
                     user.oldPasswords = new TreeSet<>(new Comparator<PasswordHistory>() {
                         @Override
                         public int compare(PasswordHistory o1, PasswordHistory o2) {
-                            return Long.compare(o1.date, o2.date);
+                            int dateComparison = Long.compare(o1.date, o2.date);
+                            return dateComparison != 0 ? dateComparison : o1.password.compareTo(o2.password);
                         }
                     });
                     do {
@@ -456,7 +477,12 @@ public class Schema {
                         if (passwordHistory != null) {
                             user.addOldPassword(
                                 passwordHistory,
-                                context.get(Settings.PASSWORD_HISTORY_LIMIT, Integer.class)
+                                context.get(Settings.PASSWORD_HISTORY_LIMIT, Integer.class),
+                                context.get(
+                                    Settings.PASSWORD_HISTORY_DAYS,
+                                    Integer.class,
+                                    Settings.DEFAULT_PASSWORD_HISTORY_DAYS
+                                )
                             );
                         }
 
@@ -589,9 +615,10 @@ public class Schema {
             return validFrom;
         }
 
-        public void addOldPassword(PasswordHistory passwordHistory, int passwordHistoryLimit) {
+        public void addOldPassword(PasswordHistory passwordHistory, int passwordHistoryLimit, int passwordHistoryDays) {
             oldPasswords.add(passwordHistory);
-            if (oldPasswords.size() >= passwordHistoryLimit) {
+            long cutoff = DateUtils.add(System.currentTimeMillis(), Calendar.DAY_OF_MONTH, -passwordHistoryDays);
+            while (oldPasswords.size() > passwordHistoryLimit && oldPasswords.first().date < cutoff) {
                 oldPasswords.remove(oldPasswords.first());
             }
         }
@@ -693,6 +720,10 @@ public class Schema {
     static {
         for (ExtKey key: Arrays.asList(
             Settings.PASSWORD_HISTORY_LIMIT,
+            Settings.PASSWORD_HISTORY_DAYS,
+            Settings.PASSWORD_REJECT_REPEATED,
+            Settings.PASSWORD_REJECT_KEYBOARD_SEQUENCES,
+            Settings.PASSWORD_REQUIRE_SPECIAL,
             Settings.LOCK_MINUTES,
             Settings.PRESENT_WELCOME_MESSAGE,
             Settings.MESSAGE_SEPARATOR,
@@ -933,11 +964,17 @@ public class Schema {
             if (userKeys.containsKey(UserKeys.UNLOCK_TIME)) {
                 users.setTimestamp("unlock_time", userKeys.get(UserKeys.UNLOCK_TIME, Long.class));
             }
+            boolean manualUnlock = userKeys.containsKey(UserKeys.UNLOCK_TIME) && isManualUnlock(
+                userKeys.get(UserKeys.UNLOCK_TIME, Long.class),
+                System.currentTimeMillis()
+            );
             if (userKeys.containsKey(UserKeys.SUCCESSFUL_LOGIN)) {
                 users.setTimestamp("last_successful_login", userKeys.get(UserKeys.SUCCESSFUL_LOGIN, Long.class));
             }
+            boolean clearFailures = Boolean.TRUE.equals(userKeys.get(UserKeys.CLEAR_FAILURES, Boolean.class));
             if (userKeys.containsKey(UserKeys.UNLOCK_TIME) ||
-                    userKeys.containsKey(UserKeys.SUCCESSFUL_LOGIN)) {
+                    userKeys.containsKey(UserKeys.SUCCESSFUL_LOGIN) ||
+                    clearFailures) {
                 users.setInteger("consecutive_failures", 0);
             }
             if (userKeys.containsKey(UserKeys.UNSUCCESSFUL_LOGIN)) {
@@ -975,6 +1012,9 @@ public class Schema {
             }
             if (op == Sql.ModificationTypes.UPDATE && userKeys.containsKey(UserKeys.UNSUCCESSFUL_LOGIN)) {
                 upsertFailedLoginRecord(id, userKeys, conn);
+            }
+            if (op == Sql.ModificationTypes.UPDATE && (manualUnlock || clearFailures)) {
+                deleteFailedLoginRecords(id, conn);
             }
             if (op == Sql.ModificationTypes.UPDATE && userKeys.containsKey(SharedKeys.ADD_GROUP)) {
                 updateGroupMembership(id, userKeys.get(SharedKeys.ADD_GROUP, String.class), conn, true, true);
@@ -1162,6 +1202,18 @@ public class Schema {
                 ).asSql()
             ).execute(conn, false);
         }
+    }
+
+    private static void deleteFailedLoginRecords(Integer id, Connection conn) throws SQLException {
+        new Sql.Modification(
+            new Sql.Template(Sql.ModificationTypes.DELETE, "failed_logins")
+                .where(Formatter.format("user_id = {}", id))
+                .asSql()
+        ).execute(conn, false);
+    }
+
+    static boolean isManualUnlock(long unlockTime, long currentTime) {
+        return unlockTime <= currentTime;
     }
 
     private static void InsertPassHistoryRecord(Integer id, ExtMap input, Connection conn)

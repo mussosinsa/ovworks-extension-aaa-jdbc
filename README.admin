@@ -96,6 +96,99 @@ following steps:
    permissions to users/groups defined in your PROFILE
 
 
+Password policy
+---------------
+
+The default policy requires a password of at least twelve characters containing
+an uppercase letter, a lowercase letter, a number, and a special character.
+It also rejects a password identical to the user name, repeated patterns, and
+four-character alphabetic, numeric, or adjacent-keyboard sequences (for
+example, `1234`, `qwer`, and `asdf`).
+
+The optional checks can be selected by updating the corresponding row in the
+profile database's `settings` table:
+
+* `PASSWORD_REQUIRE_SPECIAL`
+* `PASSWORD_REJECT_REPEATED`
+* `PASSWORD_REJECT_KEYBOARD_SEQUENCES`
+* `PASSWORD_HISTORY_LIMIT`
+* `PASSWORD_HISTORY_DAYS`
+
+Set a Boolean option to `FALSE` or a numeric option to `0` to disable it.
+`PASSWORD_HISTORY_DAYS` is configurable from 0 through 90 days. Changes take
+effect at the next configured settings refresh or after restarting the engine.
+
+`user add` creates a disabled-password account; assign its initial password
+with `user password-reset`. Unless the explicit administrative `--force` or
+pre-encrypted import path is used, that command applies the same policy as a
+user-initiated password change. The default policy maps to the type (2)
+requirements as follows:
+
+* `MIN_LENGTH=12` exceeds the mandatory six-character minimum.
+* `PASSWORD_COMPLEXITY` requires at least one uppercase letter, lowercase
+  letter, and digit. Set an individual group's `min` to `-1` to disable it.
+* `PASSWORD_REQUIRE_SPECIAL` controls the optional special-character check.
+* Equality with the user ID is always rejected, case-insensitively.
+* `PASSWORD_REJECT_REPEATED` rejects three or more adjacent occurrences of the
+  same letter or digit.
+* `PASSWORD_REJECT_KEYBOARD_SEQUENCES` rejects four or more horizontal keyboard
+  characters, including `qwer`, `asdf`, and `1234`, in either direction and
+  without case sensitivity. It also rejects four alphabetic or numeric code
+  points in ascending or descending order, such as `abcd` and `4321`.
+* `PASSWORD_HISTORY_LIMIT` protects the configured number of previous
+  passwords, while `PASSWORD_HISTORY_DAYS` protects every password used in the
+  configured period. Set both to `0` to disable previous-password reuse checks;
+  the day setting cannot exceed 90.
+
+
+Account unlock policy
+---------------------
+
+`user unlock` starts the account with a clean authentication-failure state: it
+sets the unlock time, resets `consecutive_failures`, and deletes that user's
+rows from `failed_logins` in the same database transaction. Setting a future
+unlock time while automatically locking an account does not delete interval
+history, so an expired lock cannot be used to evade `MAX_FAILURES_PER_INTERVAL`.
+
+Do not disable or raise `MAX_FAILURES_PER_INTERVAL` merely to recover a locked
+account. Use `user unlock` instead. The secure defaults retain 20 failures per
+24-hour interval and a 60-minute lock; weakening the interval limit can permit
+substantially more password guesses.
+
+
+Vault Transit protected passphrases
+-----------------------------------
+
+Encrypted database configuration files and the encryptor passphrase selected
+by `secret_file` may use the authenticated `OVVLT001` envelope. Its 256-bit
+data-encryption key is wrapped by a
+non-exportable Vault Transit key, while AES-256-GCM protects the passphrase and
+authenticates the envelope metadata. Configure `vault_transit` in
+`/etc/ovirt-engine/encryptor/config.json` with `enabled`, `address`, `mount`,
+`key_name`, `token_file`, `ca_cert`, and `timeout`. The token and configuration
+must not be group/other writable, and the token needs only `update` on the
+configured `transit/decrypt/<key_name>` endpoint.
+
+HTTPS is required. Plain HTTP is accepted only for a loopback address when
+`allow_plaintext_loopback` is explicitly enabled for development. Reading an
+`OVVLT001` passphrase fails closed when Vault is unavailable, sealed, rejects
+the token, or returns an invalid key, and when any envelope metadata or
+ciphertext authentication fails.
+
+`ovirt-aaa-jdbc-tool` skips `engine-prolog.sh` when it detects an encrypted
+database entry in `engine.conf.d`. Such files are binary envelopes rather than
+shell fragments; sourcing one would fail before the Java decryptor can run. In
+that case the launcher constructs the standard oVirt module path directly and
+accepts `JAVA_HOME`, `JBOSS_HOME`, `ENGINE_USR`, `ENGINE_ETC`, and
+`ENGINE_JAVA_MODULEPATH` overrides. Plaintext installations retain the existing
+`engine-prolog.sh` behavior.
+
+The packaged JDBC module loads PostgreSQL JDBC together with its
+`ongres-scram` and `ongres-stringprep` dependencies. This is required when the
+PostgreSQL role uses SCRAM-SHA-256 authentication; omitting those dependencies
+causes the driver to fail before it can authenticate.
+
+
 
 IV. Upgrading 'internal' profile
 
@@ -137,4 +230,3 @@ To upgrade custom aaa-jdbc profiles please do following steps:
 
      EL6:          service ovirt-engine start
      EL7/Fedora:   systemctl start ovirt-engine
-

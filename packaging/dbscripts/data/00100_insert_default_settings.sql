@@ -43,6 +43,10 @@ VALUES
 ('dc3e2fb4-cbcc-4f5c-9b06-5db9ec534aa8','PASSWORD_EXPIRATION_DAYS', 180, 'upon expired password change, new password is valid to X days'),
 ('69d5cec2-bd1a-42e1-84f0-05627ee476b3','PASSWORD_EXPIRATION_NOTICE_DAYS', 0, 'show message X days before expiration'),
 ('e843bc2a-0878-4b6f-9be3-32e83169fb7c', 'PASSWORD_HISTORY_LIMIT', 3, 'number of old passwords to keep/check against in password change'),
+('77cd7071-1d6d-48ba-ac07-ddf50d03329d', 'PASSWORD_HISTORY_DAYS', 90, 'reject passwords used in the previous X days; valid range is 0 through 90'),
+('fd5e8737-a93f-4765-a229-6ecf64d3b91d', 'PASSWORD_REJECT_REPEATED', TRUE, 'reject repeated characters and repeated patterns'),
+('b5b1937e-4473-4333-9639-26f10dc4d9c8', 'PASSWORD_REJECT_KEYBOARD_SEQUENCES', TRUE, 'reject four-character alphabetic, numeric, and keyboard sequences'),
+('eb4c52e7-0e8a-45f5-9825-61f9b9ee029b', 'PASSWORD_REQUIRE_SPECIAL', TRUE, 'require at least one special character'),
 --
 ('aaa93f69-7b75-44ee-b8a7-4d4736e73be1', 'ALLOW_EXPIRED_PASSWORD_CHANGE', FALSE, 'if true when a password expires the user can change it'),
 
@@ -55,9 +59,9 @@ VALUES
 -------------------------
 
 ('b55243d1-27b5-49bf-8436-67d5ada33975', 'PASSWORD_COMPLEXITY',
-'UPPERCASE:chars=ABCDEFGHIJKLMNOPQRSTUVWXYZ::min=-1::LOWERCASE:chars=abcdefghijklmnopqrstuvwxyz::min=-1::NUMBERS:chars=0123456789::min=-1::',
+'UPPERCASE:chars=ABCDEFGHIJKLMNOPQRSTUVWXYZ::min=1::LOWERCASE:chars=abcdefghijklmnopqrstuvwxyz::min=1::NUMBERS:chars=0123456789::min=1::',
 'complexity groups definition. format:\n[name:chars=x::min=y::...]\nmin=-1 no limit. following chars should be escaped: \\t, \\n, \\f, \\'', \\" \\\\'),
-('24e7de2f-a714-4f3e-8f64-13bc6ee7525b', 'MIN_LENGTH', 6, 'passwords are at least X characters long'),
+('24e7de2f-a714-4f3e-8f64-13bc6ee7525b', 'MIN_LENGTH', 12, 'passwords are at least X characters long'),
 
 --
 -- Search queries
@@ -72,4 +76,3 @@ VALUES
 ('fba813af-4c30-448f-8df9-9334449c149e', 'SETTINGS_INTERVAL_MINUTES', -1, 'attempt to refresh settings for settings table at most every X minutes. -1 = never'),
 ('d89abf58-f0ca-4be8-8ec3-45a1f3645c7b', 'HOUSE_KEEPING_INTERVAL_HOURS', 24, 'perform house keeping tasks every X hours. -1 = never'),
 ('12fb6fee-797b-47e7-83e1-1f1fd8b8dd05', 'FAILED_LOGINS_OLD_DAYS', 7, 'during house keeping, delete failed logins older then X days. -1 = never');
-

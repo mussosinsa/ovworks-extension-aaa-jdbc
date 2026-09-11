@@ -6,5 +6,8 @@ jackson-databind
 java-11-openjdk-devel
 maven
 maven-local
+ongres-scram
+ongres-stringprep
 ovirt-engine-extensions-api
+postgresql-jdbc
 sed

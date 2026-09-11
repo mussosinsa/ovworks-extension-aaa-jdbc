@@ -22,6 +22,11 @@ import java.io.ByteArrayInputStream;
 import java.io.File;
 import java.io.IOException;
 import java.io.InputStreamReader;
+import java.net.InetAddress;
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
@@ -31,11 +36,16 @@ import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.nio.file.attribute.PosixFilePermission;
+import java.security.GeneralSecurityException;
+import java.security.KeyStore;
+import java.security.cert.CertificateFactory;
 import java.sql.Connection;
 import java.sql.SQLException;
 import java.text.MessageFormat;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Base64;
 import java.util.Collections;
 import java.util.List;
 import java.util.Properties;
@@ -47,6 +57,8 @@ import javax.crypto.SecretKeyFactory;
 import javax.crypto.spec.GCMParameterSpec;
 import javax.crypto.spec.PBEKeySpec;
 import javax.crypto.spec.SecretKeySpec;
+import javax.net.ssl.SSLContext;
+import javax.net.ssl.TrustManagerFactory;
 import javax.sql.DataSource;
 
 import org.ovirt.engine.api.extensions.Base;
@@ -58,11 +70,13 @@ import org.ovirt.engine.extension.aaa.jdbc.core.datasource.Sql;
 public class ExtensionUtils {
 
     private static final byte[] ENCRYPTED_MAGIC = "OVENC001".getBytes(StandardCharsets.US_ASCII);
+    private static final byte[] VAULT_MAGIC = "OVVLT001".getBytes(StandardCharsets.US_ASCII);
     private static final int ENCRYPTED_VERSION = 1;
     private static final int PBKDF2_ITERATIONS = 600_000;
     private static final int DATA_KEY_SIZE = 32;
     private static final int WRAPPED_KEY_SIZE = DATA_KEY_SIZE + 16;
     private static final int HEADER_SIZE = 8 + 1 + 4 + 16 + 12 + 12 + 2;
+    private static final int VAULT_HEADER_SIZE = 8 + 1 + 12 + 2;
     private static final Path ENCRYPTOR_CONFIG = Paths.get("/etc/ovirt-engine/encryptor/config.json");
     private static final String DEFAULT_CREDENTIAL = "ovirt-encryptor-passphrase";
     private static final String PASSPHRASE_ENV = "OVIRT_ENCRYPTOR_PASSPHRASE";
@@ -82,14 +96,17 @@ public class ExtensionUtils {
         Base.ContextKeys.BUILD_INTERFACE_VERSION, Base.INTERFACE_VERSION_CURRENT
     );
 
-    /** Load a properties file, transparently decrypting the OVENC001 format. */
+    /** Load a properties file, transparently decrypting OVENC001 and OVVLT001 formats. */
     public static Properties loadPropertiesFromFile(String filename) throws IOException {
         return loadPropertiesFromFile(Paths.get(filename), ENCRYPTOR_CONFIG);
     }
 
     static Properties loadPropertiesFromFile(Path filename, Path encryptorConfig) throws IOException {
         byte[] content = readRegularFile(filename, false);
-        if (startsWithMagic(content)) {
+        if (startsWith(content, VAULT_MAGIC)) {
+            JsonNode config = loadEncryptorConfig(encryptorConfig);
+            content = decryptOvvlt001(content, vaultClient(config));
+        } else if (startsWithMagic(content)) {
             JsonNode config = loadEncryptorConfig(encryptorConfig);
             byte[] passphrase = obtainPassphrase(config);
             try {
@@ -136,6 +153,10 @@ public class ExtensionUtils {
             }
         }
         return true;
+    }
+
+    private static boolean startsWith(byte[] data, byte[] magic) {
+        return data.length >= magic.length && Arrays.equals(Arrays.copyOf(data, magic.length), magic);
     }
 
     static byte[] decryptOvenc001(byte[] data, byte[] passphrase) throws IOException {
@@ -218,7 +239,7 @@ public class ExtensionUtils {
     }
 
     private static byte[] decryptGcm(byte[] ciphertext, byte[] key, byte[] nonce, byte[] aad)
-            throws Exception {
+            throws GeneralSecurityException {
         Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
         cipher.init(Cipher.DECRYPT_MODE, new SecretKeySpec(key, "AES"), new GCMParameterSpec(128, nonce));
         cipher.updateAAD(aad);
@@ -251,11 +272,171 @@ public class ExtensionUtils {
 
         String secretFile = text(config, "secret_file", null);
         if (secretFile != null) {
-            return trimNewlines(readSecretFile(Paths.get(secretFile)));
+            byte[] secret = readSecretFile(Paths.get(secretFile));
+            if (startsWith(secret, VAULT_MAGIC)) {
+                return decryptOvvlt001(secret, vaultClient(config));
+            }
+            return trimNewlines(secret);
         }
         throw new IOException(
             "No key credential available (systemd credential, environment, or 0600 secret file)"
         );
+    }
+
+    interface VaultDecryptor {
+        byte[] decrypt(String ciphertext) throws IOException;
+    }
+
+    /*
+     * OVVLT001: magic[8], version[1], content nonce[12], wrapped-key length[2],
+     * UTF-8 Vault ciphertext, and AES-256-GCM ciphertext. The fixed header and
+     * Vault ciphertext are authenticated as AAD by the content encryption.
+     */
+    static byte[] decryptOvvlt001(byte[] envelope, VaultDecryptor vault) throws IOException {
+        if (envelope.length < VAULT_HEADER_SIZE + 1 + 16) {
+            throw new IOException("Vault envelope is truncated");
+        }
+        ByteBuffer header = ByteBuffer.wrap(envelope, 0, VAULT_HEADER_SIZE).order(ByteOrder.BIG_ENDIAN);
+        byte[] magic = new byte[VAULT_MAGIC.length];
+        byte[] nonce = new byte[12];
+        header.get(magic);
+        int version = Byte.toUnsignedInt(header.get());
+        header.get(nonce);
+        int wrappedLength = Short.toUnsignedInt(header.getShort());
+        if (!Arrays.equals(magic, VAULT_MAGIC) || version != ENCRYPTED_VERSION) {
+            throw new IOException("Unsupported Vault envelope format");
+        }
+        if (wrappedLength == 0 || envelope.length < VAULT_HEADER_SIZE + wrappedLength + 16) {
+            throw new IOException("Invalid Vault-wrapped data-key length");
+        }
+        byte[] fixedHeader = Arrays.copyOfRange(envelope, 0, VAULT_HEADER_SIZE);
+        byte[] wrapped = Arrays.copyOfRange(envelope, VAULT_HEADER_SIZE, VAULT_HEADER_SIZE + wrappedLength);
+        byte[] ciphertext = Arrays.copyOfRange(envelope, VAULT_HEADER_SIZE + wrappedLength, envelope.length);
+        byte[] aad = new byte[fixedHeader.length + wrapped.length];
+        System.arraycopy(fixedHeader, 0, aad, 0, fixedHeader.length);
+        System.arraycopy(wrapped, 0, aad, fixedHeader.length, wrapped.length);
+        byte[] dataKey = vault.decrypt(new String(wrapped, StandardCharsets.UTF_8));
+        try {
+            if (dataKey.length != DATA_KEY_SIZE) {
+                throw new IOException("Vault returned an invalid data-key length");
+            }
+            return decryptGcm(ciphertext, dataKey, nonce, aad);
+        } catch (AEADBadTagException e) {
+            throw new IOException("Vault envelope authentication failed", e);
+        } catch (GeneralSecurityException e) {
+            throw new IOException("Unable to decrypt Vault envelope", e);
+        } finally {
+            Arrays.fill(dataKey, (byte) 0);
+        }
+    }
+
+    private static VaultDecryptor vaultClient(JsonNode config) throws IOException {
+        JsonNode vault = config.get("vault_transit");
+        if (vault == null || !vault.path("enabled").asBoolean(false)) {
+            throw new IOException("Passphrase uses OVVLT001 but Vault Transit is not enabled");
+        }
+        URI address;
+        try {
+            address = URI.create(text(vault, "address", ""));
+            validateVaultAddress(address, vault.path("allow_plaintext_loopback").asBoolean(false));
+        } catch (IllegalArgumentException e) {
+            throw new IOException("Invalid Vault Transit address", e);
+        }
+        String mount = validateVaultPath(text(vault, "mount", "transit"), "mount");
+        String keyName = validateVaultPath(text(vault, "key_name", "ovirt-engine-config"), "key_name");
+        Path tokenFile = Paths.get(text(vault, "token_file", ""));
+        String token = new String(trimNewlines(readSecretFile(tokenFile)), StandardCharsets.UTF_8);
+        int timeout = vault.path("timeout").asInt(5);
+        if (timeout < 1) {
+            throw new IOException("Vault timeout must be positive");
+        }
+        HttpClient.Builder builder = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(timeout));
+        String caCert = text(vault, "ca_cert", null);
+        if (caCert != null) {
+            builder.sslContext(createSslContext(Paths.get(caCert)));
+        }
+        HttpClient client = builder.build();
+        URI decryptUri = address.resolve("/v1/" + mount + "/decrypt/" + keyName);
+        return wrapped -> decryptWithVault(client, decryptUri, token, timeout, wrapped);
+    }
+
+    private static byte[] decryptWithVault(
+        HttpClient client, URI uri, String token, int timeout, String wrapped
+    ) throws IOException {
+        String body = "{\"ciphertext\":" + new ObjectMapper().valueToTree(wrapped).toString() + "}";
+        HttpRequest request = HttpRequest.newBuilder(uri)
+            .timeout(Duration.ofSeconds(timeout))
+            .header("Content-Type", "application/json")
+            .header("X-Vault-Token", token)
+            .POST(HttpRequest.BodyPublishers.ofString(body, StandardCharsets.UTF_8))
+            .build();
+        try {
+            HttpResponse<String> response = client.send(
+                request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8)
+            );
+            if (response.statusCode() != 200) {
+                throw new IOException("Vault Transit decrypt failed with HTTP " + response.statusCode());
+            }
+            JsonNode plaintext = new ObjectMapper().readTree(response.body()).path("data").get("plaintext");
+            if (plaintext == null || !plaintext.isTextual()) {
+                throw new IOException("Vault Transit response contains no plaintext");
+            }
+            return Base64.getDecoder().decode(plaintext.asText());
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IOException("Interrupted while calling Vault Transit", e);
+        } catch (IllegalArgumentException e) {
+            throw new IOException("Vault Transit returned invalid Base64 plaintext", e);
+        }
+    }
+
+    private static void validateVaultAddress(URI address, boolean allowPlaintextLoopback) {
+        String path = address.getPath();
+        if (address.getHost() == null || address.getUserInfo() != null || address.getQuery() != null ||
+                address.getFragment() != null || (path != null && !path.replace("/", "").isEmpty())) {
+            throw new IllegalArgumentException("Vault address must contain only scheme, host, and optional port");
+        }
+        if ("https".equalsIgnoreCase(address.getScheme())) {
+            return;
+        }
+        if (!"http".equalsIgnoreCase(address.getScheme()) || !allowPlaintextLoopback ||
+                !isLoopback(address.getHost())) {
+            throw new IllegalArgumentException("Vault requires HTTPS; HTTP is allowed only for loopback development");
+        }
+    }
+
+    private static boolean isLoopback(String host) {
+        try {
+            return InetAddress.getByName(host).isLoopbackAddress();
+        } catch (IOException e) {
+            return false;
+        }
+    }
+
+    private static String validateVaultPath(String value, String field) throws IOException {
+        if (!value.matches("[A-Za-z0-9_-]+")) {
+            throw new IOException("Invalid Vault " + field);
+        }
+        return value;
+    }
+
+    private static SSLContext createSslContext(Path caCert) throws IOException {
+        try {
+            KeyStore store = KeyStore.getInstance(KeyStore.getDefaultType());
+            store.load(null, null);
+            try (java.io.InputStream input = Files.newInputStream(caCert)) {
+                store.setCertificateEntry(
+                    "vault-ca", CertificateFactory.getInstance("X.509").generateCertificate(input)
+                );
+            }
+            TrustManagerFactory factory = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm());
+            factory.init(store);
+            SSLContext context = SSLContext.getInstance("TLS");
+            context.init(null, factory.getTrustManagers(), null);
+            return context;
+        } catch (GeneralSecurityException e) {
+            throw new IOException("Unable to load Vault CA certificate", e);
+        }
     }
 
     private static byte[] readSecretFile(Path path) throws IOException {

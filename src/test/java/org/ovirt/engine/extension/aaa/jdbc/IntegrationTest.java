@@ -252,36 +252,46 @@ public class IntegrationTest {
             ),
             new Test(
                 CREDENTIALS_CHANGE,
-                new String[]{"bob-brainfreese", "brainfreese", "potato"},
+                new String[]{"bob-brainfreese", "brainfreese", "SecurePotato1!"},
                 Authn.AuthResult.SUCCESS,
                 "Should succeed to change password",
                 before("UPDATE settings SET value =  '1' WHERE name = 'PASSWORD_HISTORY_LIMIT' ;")
             ),
             new Test(
                 AUTHENTICATE_CREDENTIALS,
-                new String[]{"bob-brainfreese", "potato"},
+                new String[]{"bob-brainfreese", "SecurePotato1!"},
                 Authn.AuthResult.SUCCESS,
                 "Should succeed - new password"
             ),
             new Test(
                 CREDENTIALS_CHANGE,
-                new String[]{"bob-brainfreese", "potato", "potato"},
+                new String[]{"bob-brainfreese", "SecurePotato1!", "SecurePotato1!"},
                 Authn.AuthResult.GENERAL_ERROR,
                 "Should fail - changing into current password"
             ),
             new Test(
                 CREDENTIALS_CHANGE,
-                new String[]{"bob-brainfreese", "potato", "brainfreese"},
+                new String[]{"bob-brainfreese", "SecurePotato1!", "brainfreese"},
                 Authn.AuthResult.GENERAL_ERROR,
                 "Should fail - changing into previous password"
             ),
             new Test(
                 CREDENTIALS_CHANGE,
-                new String[]{"bob-brainfreese", "potato", "brainfreese"},
+                new String[]{"bob-brainfreese", "SecurePotato1!", "brainfreese"},
                 Authn.AuthResult.SUCCESS,
-                "Should succeed - history limit is 0",
-                before("UPDATE settings SET value =  '0' WHERE name = 'PASSWORD_HISTORY_LIMIT' ;"),
-                after("UPDATE settings SET value =  '3' WHERE name = 'PASSWORD_HISTORY_LIMIT' ;")
+                "Should succeed - password history checks are disabled",
+                before("UPDATE settings SET value = '0' WHERE name IN " +
+                    "('PASSWORD_HISTORY_LIMIT', 'PASSWORD_HISTORY_DAYS', 'PASSWORD_REQUIRE_SPECIAL', 'MIN_LENGTH') ; " +
+                    "UPDATE settings SET value = 'UPPERCASE:chars=ABCDEFGHIJKLMNOPQRSTUVWXYZ::min=-1::" +
+                    "LOWERCASE:chars=abcdefghijklmnopqrstuvwxyz::min=-1::NUMBERS:chars=0123456789::min=-1::' " +
+                    "WHERE name = 'PASSWORD_COMPLEXITY' ;"),
+                after("UPDATE settings SET value = CASE name WHEN 'PASSWORD_HISTORY_LIMIT' THEN '3' ELSE '90' END " +
+                    "WHERE name IN ('PASSWORD_HISTORY_LIMIT', 'PASSWORD_HISTORY_DAYS') ; " +
+                    "UPDATE settings SET value = 12 WHERE name = 'MIN_LENGTH' ; " +
+                    "UPDATE settings SET value = TRUE WHERE name = 'PASSWORD_REQUIRE_SPECIAL' ; " +
+                    "UPDATE settings SET value = 'UPPERCASE:chars=ABCDEFGHIJKLMNOPQRSTUVWXYZ::min=1::" +
+                    "LOWERCASE:chars=abcdefghijklmnopqrstuvwxyz::min=1::NUMBERS:chars=0123456789::min=1::' " +
+                    "WHERE name = 'PASSWORD_COMPLEXITY' ;")
             )
         );
 
