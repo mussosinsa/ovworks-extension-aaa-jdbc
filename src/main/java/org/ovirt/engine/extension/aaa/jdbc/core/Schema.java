@@ -141,6 +141,19 @@ public class Schema {
         public static final ExtKey SUCCESSFUL_LOGIN = new ExtKey("CATALOG_SUCCESSFUL_LOGIN", Long.class, "338117a2-4eec-4aca-9dd1-9bcbe95600f2");
         /**  last_unsuccessful_login = value, consecutive_failures++, insert a failed_login record */
         public static final ExtKey UNSUCCESSFUL_LOGIN = new ExtKey("CATALOG_SUCCESSFUL_LOGIN", Long.class, "c10a40f8-5fed-4908-a27e-ec9b0ae83324");
+        /**
+         * consecutive_failures = 0 and the failed_login records are deleted.
+         *
+         * <p>Set by a caller that knows the failures no longer stand for anything - a password
+         * change that went through, say, where the user has just proved they hold the account.
+         * Leaving the records would let the interval rule (MAX_FAILURES_PER_INTERVAL over
+         * INTERVAL_HOURS) lock the account over attempts the change already answered for.</p>
+         *
+         * <p>This is said rather than inferred. A manual unlock can be told apart by the
+         * unlock_time it writes, since a lock writes one in the future; a password change writes
+         * no unlock_time at all and there is nothing to read it from.</p>
+         */
+        public static final ExtKey CLEAR_FAILURES = new ExtKey("CATALOG_CLEAR_FAILURES", Boolean.class, "0a4a4c4c-3e5e-4cf1-9d2b-6f6a2f6b4d21");
     }
 
     public static class GroupIdentifiers {
@@ -958,8 +971,10 @@ public class Schema {
             if (userKeys.containsKey(UserKeys.SUCCESSFUL_LOGIN)) {
                 users.setTimestamp("last_successful_login", userKeys.get(UserKeys.SUCCESSFUL_LOGIN, Long.class));
             }
+            boolean clearFailures = Boolean.TRUE.equals(userKeys.get(UserKeys.CLEAR_FAILURES, Boolean.class));
             if (userKeys.containsKey(UserKeys.UNLOCK_TIME) ||
-                    userKeys.containsKey(UserKeys.SUCCESSFUL_LOGIN)) {
+                    userKeys.containsKey(UserKeys.SUCCESSFUL_LOGIN) ||
+                    clearFailures) {
                 users.setInteger("consecutive_failures", 0);
             }
             if (userKeys.containsKey(UserKeys.UNSUCCESSFUL_LOGIN)) {
@@ -998,7 +1013,7 @@ public class Schema {
             if (op == Sql.ModificationTypes.UPDATE && userKeys.containsKey(UserKeys.UNSUCCESSFUL_LOGIN)) {
                 upsertFailedLoginRecord(id, userKeys, conn);
             }
-            if (op == Sql.ModificationTypes.UPDATE && manualUnlock) {
+            if (op == Sql.ModificationTypes.UPDATE && (manualUnlock || clearFailures)) {
                 deleteFailedLoginRecords(id, conn);
             }
             if (op == Sql.ModificationTypes.UPDATE && userKeys.containsKey(SharedKeys.ADD_GROUP)) {

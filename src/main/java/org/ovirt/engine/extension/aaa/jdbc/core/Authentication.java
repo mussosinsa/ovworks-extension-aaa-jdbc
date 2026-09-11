@@ -130,7 +130,8 @@ public class Authentication implements Observer {
             response = authenticate(
                 subject,
                 credentials,
-                loginTime
+                loginTime,
+                credChange
             );
             if (
                 credChange &&
@@ -163,9 +164,20 @@ public class Authentication implements Observer {
                                 settings.get(Schema.Settings.PASSWORD_EXPIRATION_DAYS, Integer.class)
                             )
                         )
+                        // The user has just proved they hold this account, so the failures counted
+                        // against it stand for nothing now. Left behind, they keep counting towards
+                        // the interval rule and lock the account on the next slip.
+                        .mput(Schema.UserKeys.CLEAR_FAILURES, true)
                     );
                     response = AuthResponse.positive();
                 } else {
+                    // A rejected new password is not a guess at the old one and is not counted.
+                    // Getting the current password wrong is, and this is where that is found out:
+                    // the expired state is decided before any password is checked, so nothing
+                    // earlier could have counted it.
+                    if (credChangeResponse.result == Authn.AuthResult.CREDENTIALS_INCORRECT) {
+                        recordFailure(response.user, loginTime);
+                    }
                     response = credChangeResponse;
                 }
             }
@@ -178,10 +190,20 @@ public class Authentication implements Observer {
     }
 
     //never return null
+    /**
+     * @param credChange whether this is a password change rather than a plain login. It decides
+     *        only one thing here: an expired password is the state a change exists to end, not a
+     *        failed attempt at logging in, so on a change it is not counted as one. Counting it
+     *        locked an account after five tries at the change form - and for the administrator
+     *        created by engine-setup, whose password is expired from the start and who has nobody
+     *        to unlock it, that meant the first login could lock the account out of its own
+     *        deployment.
+     */
     private AuthResponse authenticate(
         String subject,
         String credentials,
-        long loginTime
+        long loginTime,
+        boolean credChange
     ) throws GeneralSecurityException, SQLException, IOException {
         AuthResponse response = null;
         Schema.User user = null;
@@ -220,17 +242,33 @@ public class Authentication implements Observer {
                         new ExtMap().mput(Schema.UserIdentifiers.USER_ID, user.getId())
                         .mput(Schema.UserKeys.SUCCESSFUL_LOGIN, loginTime)
                     );
-                } else {
-                    updateUser(
-                        new ExtMap().mput(Schema.UserIdentifiers.USER_ID, user.getId())
-                        .mput(Schema.UserKeys.UNSUCCESSFUL_LOGIN, loginTime)
-                    );
-                    user = getUser(subject);
-                    checkLock(user, loginTime);
+                } else if (!isExpiredDuringCredChange(credChange, response.result)) {
+                    recordFailure(user, subject, loginTime);
                 }
             }
         }
         return response;
+    }
+
+    /**
+     * @return true when the only thing wrong is that the password has expired and the caller is
+     *         here to replace it. Every other refusal is counted, on a change as on a login.
+     */
+    static boolean isExpiredDuringCredChange(boolean credChange, int result) {
+        return credChange && result == Authn.AuthResult.CREDENTIALS_EXPIRED;
+    }
+
+    private void recordFailure(Schema.User user, String subject, long loginTime) throws SQLException {
+        updateUser(
+            new ExtMap().mput(Schema.UserIdentifiers.USER_ID, user.getId())
+            .mput(Schema.UserKeys.UNSUCCESSFUL_LOGIN, loginTime)
+        );
+        // re-read, so the lock is decided on the count this failure has just become part of
+        checkLock(getUser(subject), loginTime);
+    }
+
+    private void recordFailure(Schema.User user, long loginTime) throws SQLException {
+        recordFailure(user, user.getName(), loginTime);
     }
 
     private Schema.User getUser(String subject) throws SQLException {
