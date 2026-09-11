@@ -322,6 +322,11 @@ public class Cli {
                                 Schema.UserIdentifiers.USERNAME,
                                 context.<String>get(ContextKeys.POSITIONAL)
                             ).mput(Schema.UserKeys.UNLOCK_TIME, System.currentTimeMillis())
+                            // Unlocking is a statement that the account starts over, so the
+                            // failures the interval rule counts go with it. Without this the
+                            // account is locked again by the next mistake, as often as it is
+                            // unlocked, until they age out of the interval.
+                            .mput(Schema.UserKeys.CLEAR_FAILURES, true)
                         );
                         commands.get("_schema-modify").invoke(context);
                         context.putIfAbsent(ContextKeys.EXIT_STATUS, SUCCESS);

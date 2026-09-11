@@ -136,6 +136,22 @@ public class Schema {
         public static final ExtKey DISABLED = new ExtKey("CATALOG_DISABLED", Boolean.class, "7a5d77c6-f831-400b-bc8e-b9d8ea286408");
         /** unlock_time = value,  consecutive_failures = 0 */
         public static final ExtKey UNLOCK_TIME = new ExtKey("CATALOG_UNLOCK_TIME", Long.class, "7b1042a6-35ea-4108-8cc4-2ed142ba002f");
+        /**
+         * delete this user's failed_logins records.
+         *
+         * <p>Set when an administrator unlocks an account, which is a statement that the account is
+         * to start over. Clearing consecutive_failures alone does not achieve that: the account is
+         * locked by either of two rules, and the second one counts the failures of the last
+         * INTERVAL_HOURS regardless of how many times it has been unlocked since. Once that count
+         * has reached MAX_FAILURES_PER_INTERVAL the account is locked again by the very next
+         * mistake, every time, until those failures age out of the interval - which is not what
+         * unlocking an account is understood to mean.</p>
+         *
+         * <p>Deliberately separate from UNLOCK_TIME, which is also written to lock an account: a
+         * lock sets it to a time in the future. Locking must leave the interval count alone, or
+         * the rule that counts it could never fire twice.</p>
+         */
+        public static final ExtKey CLEAR_FAILURES = new ExtKey("CATALOG_CLEAR_FAILURES", Boolean.class, "0a4a4c4c-3e5e-4cf1-9d2b-6f6a2f6b4d21");
         public static final ExtKey LOCKED = new ExtKey("CATALOG_LOCKED", Boolean.class, "df080800-6460-41ad-a3d4-eec98cf1c7d0");
         /**  last_successful_login = value, consecutive_failures = 0 */
         public static final ExtKey SUCCESSFUL_LOGIN = new ExtKey("CATALOG_SUCCESSFUL_LOGIN", Long.class, "338117a2-4eec-4aca-9dd1-9bcbe95600f2");
@@ -976,6 +992,12 @@ public class Schema {
             if (op == Sql.ModificationTypes.UPDATE && userKeys.containsKey(UserKeys.UNSUCCESSFUL_LOGIN)) {
                 upsertFailedLoginRecord(id, userKeys, conn);
             }
+            if (
+                op == Sql.ModificationTypes.UPDATE &&
+                Boolean.TRUE.equals(userKeys.get(UserKeys.CLEAR_FAILURES, Boolean.class))
+            ) {
+                clearFailedLoginRecords(id, conn);
+            }
             if (op == Sql.ModificationTypes.UPDATE && userKeys.containsKey(SharedKeys.ADD_GROUP)) {
                 updateGroupMembership(id, userKeys.get(SharedKeys.ADD_GROUP, String.class), conn, true, true);
             }
@@ -1162,6 +1184,20 @@ public class Schema {
                 ).asSql()
             ).execute(conn, false);
         }
+    }
+
+    /**
+     * Forgets everything counted against this user by the interval rule, so that the account really
+     * does start over. Runs on the connection of the update that unlocked it, so the two either
+     * both take effect or neither does.
+     */
+    private static void clearFailedLoginRecords(Integer id, Connection conn) throws SQLException {
+        new Sql.Modification(
+            new Sql.Template(Sql.ModificationTypes.DELETE, "failed_logins")
+            .where(
+                Formatter.format("user_id = {}", id)
+            ).asSql()
+        ).execute(conn, false);
     }
 
     private static void InsertPassHistoryRecord(Integer id, ExtMap input, Connection conn)
