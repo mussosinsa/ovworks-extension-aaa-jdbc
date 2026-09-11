@@ -1,7 +1,5 @@
 package org.ovirt.engine.extension.aaa.jdbc.binding.cli;
 
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
 
 import java.io.BufferedReader;
 import java.io.File;
@@ -10,7 +8,6 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.Reader;
-import java.io.StringReader;
 import java.io.BufferedReader;
 import java.lang.reflect.InvocationTargetException;
 import java.net.NetworkInterface;
@@ -24,7 +21,6 @@ import java.sql.SQLException;
 import java.text.ParseException;
 import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.Base64;
 import java.util.Calendar;
 import java.util.Collection;
 import java.util.Collections;
@@ -67,11 +63,8 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import javax.crypto.Cipher;
-import javax.crypto.SecretKeyFactory;
 import javax.crypto.spec.IvParameterSpec;
-import javax.crypto.spec.PBEKeySpec;
 import javax.crypto.spec.SecretKeySpec;
-import javax.crypto.spec.GCMParameterSpec;
 
 import java.io.*;
 
@@ -1129,105 +1122,6 @@ public class Cli {
     }
 
     
-    private static Properties loadPropertiesFromJar1(String filename) {
-
-        LOG.info("+++++loadPropertiesFromJar+++++");
-
-        String encryptFlag;
-        int iterations = 200_000;
-        byte[] salt, nonce, keyCiphertext;
-
-        try {
-            File configFile = new File("/etc/ovirt-engine/encryptor/config.json");
-            ObjectMapper objectMapper = new ObjectMapper();
-            JsonNode cfg = objectMapper.readTree(configFile);
-
-            encryptFlag = cfg.get("encrypt_flag").asText("").trim().toUpperCase();
-
-            String saltB64  = optText(cfg, "salt");
-            String nonceB64 = optText(cfg, "nonce");
-            String ctB64    = optText(cfg, "decrypt_key_ciphertext");
-            if (saltB64 == null || nonceB64 == null || ctB64 == null) {
-                throw new IllegalStateException("config.json에 salt/nonce/decrypt_key_ciphertext가 없습니다.");
-            }
-            salt          = Base64.getDecoder().decode(saltB64);
-            nonce         = Base64.getDecoder().decode(nonceB64);
-            keyCiphertext = Base64.getDecoder().decode(ctB64);
-            if (cfg.hasNonNull("iterations")) {
-                iterations = cfg.get("iterations").asInt(200_000);
-            }
-        } catch (Exception e) {
-            throw new RuntimeException("Failed to read configuration from /etc/ovirt-engine/encryptor/config.json", e);
-        }
-
-        Set<String> encryptedFiles = Set.of(
-            "10-setup-database.conf",
-            "10-setup-dwh-database.conf",
-            "internal.properties"
-        );
-
-        String extractedFilename = new File(filename).getName();
-        LOG.info("+++++File Name: {}+++++", extractedFilename);
-
-        // entity-templates.properties는 고정 경로 사용
-        File file = "entity-templates.properties".equals(extractedFilename)
-            ? new File("/usr/share/ovirt-engine/conf/entity-templates.properties")
-            : new File(filename);
-
-        boolean isEncrypted = encryptedFiles.contains(extractedFilename);
-        String decryptedContent = "";
-
-        if ("YES".equals(encryptFlag) && isEncrypted) {
-            try {
-                byte[] passphrase = getMacPassphrase(null);
-                if (passphrase == null || passphrase.length == 0) {
-                    String env = System.getenv("OVIRT_ENC_PASSPHRASE");
-                    if (env == null || env.isEmpty()) {
-                        throw new IllegalStateException("MAC 패스프레이즈 획득 실패 및 OVIRT_ENC_PASSPHRASE 미설정");
-                    }
-                    passphrase = env.getBytes(StandardCharsets.UTF_8);
-                }
-
-                // (선택) pepper 추가
-                // try {
-                //     String machineId = Files.readString(Path.of("/etc/machine-id")).trim();
-                //     passphrase = concat(passphrase, ("|" + machineId).getBytes(StandardCharsets.UTF_8));
-                // } catch (Exception ignore) {}
-
-                byte[] kek = deriveKek(passphrase, salt, iterations, 32);
-                byte[] dataKey = decryptGCM(keyCiphertext, kek, nonce);
-                if (dataKey.length != 32) {
-                    throw new IllegalStateException("복원된 데이터키 길이가 32바이트(AES-256)가 아닙니다.");
-                }
-
-                decryptedContent = decryptFileCBC(file, dataKey);
-            } catch (Exception e) {
-                throw new RuntimeException("설정 파일 복호화 실패(JAR1): " + filename, e);
-            }
-        } else {
-            isEncrypted = false;
-        }
-
-        try (BufferedReader reader =
-                 isEncrypted
-                     ? new BufferedReader(new StringReader(decryptedContent))
-                     : new BufferedReader(new InputStreamReader(new FileInputStream(file), StandardCharsets.UTF_8))) {
-
-            Properties p = new Properties();
-            p.load(reader);
-            LOG.trace("read properties from {}:", filename);
-            for (Map.Entry<Object, Object> e : p.entrySet()) {
-                LOG.trace("{}=>{}", e.getKey(), e.getValue());
-            }
-            return p;
-        } catch (Exception e) {
-            throw new RuntimeException("Could not read properties from: " + filename, e);
-        }
-    }
-
-    
-     
-    
      private static Properties loadPropertiesFromJar(String filename) {
         try (
             InputStream is = Cli.class.getResourceAsStream(filename);
@@ -1500,87 +1394,27 @@ public class Cli {
     }
 
     
+    /**
+     * Reads a password handed to --password=file:&lt;path&gt;.
+     *
+     * <p>This used to load /etc/ovirt-engine/encryptor/config.json first and refuse to go on
+     * unless it carried salt, nonce and decrypt_key_ciphertext. Those keys belong to a format the
+     * engine's encryptor no longer writes, and nothing on this path ever used them: the
+     * decryption they unlocked applied to three database configuration file names, never to a
+     * password file. So the only thing that preamble could do was fail - and when it did, it
+     * failed before the command it was called for, taking every ovirt-aaa-jdbc-tool invocation
+     * that reaches here with it.</p>
+     *
+     * <p>A file that really is encrypted announces it in its own header and is decrypted on that
+     * basis wherever it is read, which is what {@code ExtensionUtils.loadPropertiesFromFile} does.
+     * Nothing is lost by not consulting the configuration for a file that carries no header.</p>
+     */
     private static String readFile(String path) throws IOException {
-        LOG.info("+++++ readFile +++++");
-
-        String encryptFlag;
-        int iterations = 200_000; // 기본값
-        byte[] salt, nonce, keyCiphertext;
-
-        // 1) /etc/ovirt-engine/encryptor/config.json 로드
-        try {
-            File configFile = new File("/etc/ovirt-engine/encryptor/config.json");
-            ObjectMapper objectMapper = new ObjectMapper();
-            JsonNode cfg = objectMapper.readTree(configFile);
-
-            encryptFlag = cfg.get("encrypt_flag").asText("").trim().toUpperCase();
-
-            String saltB64  = optText(cfg, "salt");
-            String nonceB64 = optText(cfg, "nonce");
-            String ctB64    = optText(cfg, "decrypt_key_ciphertext");
-            if (saltB64 == null || nonceB64 == null || ctB64 == null) {
-                throw new IllegalStateException("config.json에 salt/nonce/decrypt_key_ciphertext가 없습니다.");
-            }
-
-            salt          = Base64.getDecoder().decode(saltB64);
-            nonce         = Base64.getDecoder().decode(nonceB64);
-            keyCiphertext = Base64.getDecoder().decode(ctB64);
-            if (cfg.hasNonNull("iterations")) {
-                iterations = cfg.get("iterations").asInt(200_000);
-            }
-        } catch (Exception e) {
-            throw new RuntimeException("Failed to read configuration from /etc/ovirt-engine/encryptor/config.json", e);
-        }
-
         StringBuilder sb = new StringBuilder();
-        String extractedFilename = new File(path).getName();
-        File file = new File(path);
-
-        // 2) 암호화 대상 파일 목록
-        boolean targetEncrypted = extractedFilename.equals("10-setup-database.conf")
-                               || extractedFilename.equals("10-setup-dwh-database.conf")
-                               || extractedFilename.equals("internal.properties");
-
-        if ("YES".equals(encryptFlag) && targetEncrypted) {
-            try {
-                // 3) 패스프레이즈: MAC 주소 우선, 실패 시 ENV 폴백
-                byte[] passphrase = getMacPassphrase(null); // null: 기본 라우트/NIC 자동
-                if (passphrase == null || passphrase.length == 0) {
-                    String env = System.getenv("OVIRT_ENC_PASSPHRASE");
-                    if (env == null || env.isEmpty()) {
-                        throw new IllegalStateException("MAC 패스프레이즈 획득 실패 및 OVIRT_ENC_PASSPHRASE 미설정");
-                    }
-                    passphrase = env.getBytes(StandardCharsets.UTF_8);
-                }
-
-                // (선택) 호스트 바인딩 강화: /etc/machine-id pepper 추가
-                // try {
-                //     String machineId = Files.readString(Path.of("/etc/machine-id")).trim();
-                //     passphrase = concat(passphrase, ("|" + machineId).getBytes(StandardCharsets.UTF_8));
-                // } catch (Exception ignore) {}
-
-                // 4) PBKDF2-HMAC-SHA256 → KEK
-                byte[] kek = deriveKek(passphrase, salt, iterations, 32);
-
-                // 5) AES-GCM(KEK, nonce)로 decrypt_key_ciphertext 복호화 → 데이터키(32바이트)
-                byte[] dataKey = decryptGCM(keyCiphertext, kek, nonce);
-                if (dataKey.length != 32) {
-                    throw new IllegalStateException("복원된 데이터키 길이가 32바이트(AES-256)가 아닙니다.");
-                }
-
-                // 6) 파일 AES-256-CBC 복호화 (IV=파일 선두 16바이트)
-                String decryptedContent = decryptFileCBC(file, dataKey);
-                sb.append(decryptedContent);
-            } catch (Exception e) {
-                throw new RuntimeException("파일 복호화 실패: " + path, e);
-            }
-        } else {
-            // 평문 파일 읽기 (원래 로직 유지: 개행 없이 라인 이어붙임)
-            for (String line : Files.readAllLines(Paths.get(path), StandardCharsets.UTF_8)) {
-                sb.append(line);
-            }
+        // no newline between lines, as this has always done
+        for (String line : Files.readAllLines(Paths.get(path), StandardCharsets.UTF_8)) {
+            sb.append(line);
         }
-
         return sb.toString();
     }
    
@@ -1616,87 +1450,6 @@ public class Cli {
     }
     
     
- // -------- JSON 편의 --------
-    private static String optText(JsonNode node, String field) {
-        return (node.hasNonNull(field) ? node.get(field).asText() : null);
-    }
-
-    // -------- AES-256-CBC 파일 복호화 (IV=파일 앞 16바이트) --------
-    private static String decryptFileCBC(File file, byte[] dataKey) {
-        final int IV_SIZE = 16;
-        try (FileInputStream fis = new FileInputStream(file)) {
-            byte[] iv = new byte[IV_SIZE];
-            int n = fis.read(iv);
-            if (n != IV_SIZE) throw new IllegalStateException("IV 읽기 실패 또는 파일 손상: " + file);
-
-            byte[] enc = fis.readAllBytes();
-
-            SecretKeySpec keySpec = new SecretKeySpec(dataKey, "AES");
-            IvParameterSpec ivSpec = new IvParameterSpec(iv);
-
-            Cipher cipher = Cipher.getInstance("AES/CBC/PKCS5Padding");
-            cipher.init(Cipher.DECRYPT_MODE, keySpec, ivSpec);
-
-            byte[] plain = cipher.doFinal(enc);
-            return new String(plain, StandardCharsets.UTF_8);
-        } catch (Exception e) {
-            throw new RuntimeException("AES-256-CBC 파일 복호화 오류: " + file, e);
-        }
-    }
-
-    // -------- AES-GCM(KEK)로 데이터키 복호화 --------
-    private static byte[] decryptGCM(byte[] ciphertext, byte[] kek, byte[] nonce) {
-        try {
-            Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
-            GCMParameterSpec spec = new GCMParameterSpec(128, nonce);
-            cipher.init(Cipher.DECRYPT_MODE, new SecretKeySpec(kek, "AES"), spec);
-            return cipher.doFinal(ciphertext);
-        } catch (Exception e) {
-            throw new RuntimeException("AES-GCM 복호화 실패(데이터키)", e);
-        }
-    }
-
-    // -------- PBKDF2-HMAC-SHA256 (KEK 도출) --------
-    private static byte[] deriveKek(byte[] passphrase, byte[] salt, int iterations, int outLen) {
-        try {
-            PBEKeySpec spec = new PBEKeySpec(
-                new String(passphrase, StandardCharsets.UTF_8).toCharArray(),
-                salt,
-                iterations,
-                outLen * 8
-            );
-            SecretKeyFactory skf = SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256");
-            return skf.generateSecret(spec).getEncoded();
-        } catch (Exception e) {
-            throw new RuntimeException("PBKDF2 KEK 도출 실패", e);
-        }
-    }
-
-    // -------- MAC 패스프레이즈 획득(기본 라우트 우선, 폴백은 활성 NIC) --------
-    private static byte[] getMacPassphrase(String preferIface) {
-        try {
-            if (preferIface != null && !preferIface.isEmpty()) {
-                String mac = readMacByName(preferIface);
-                if (mac != null) return mac.getBytes(StandardCharsets.US_ASCII);
-            }
-            String def = detectDefaultIface();
-            if (def != null) {
-                String mac = readMacByName(def);
-                if (mac != null) return mac.getBytes(StandardCharsets.US_ASCII);
-            }
-            Enumeration<NetworkInterface> nis = NetworkInterface.getNetworkInterfaces();
-            while (nis.hasMoreElements()) {
-                NetworkInterface ni = nis.nextElement();
-                if (ni == null || ni.isLoopback() || ni.isVirtual() || !ni.isUp()) continue;
-                byte[] hw = ni.getHardwareAddress();
-                if (hw != null && hw.length == 6) {
-                    return toMacString(hw).getBytes(StandardCharsets.US_ASCII);
-                }
-            }
-        } catch (Exception ignore) {}
-        return null;
-    }
-
     private static String readMacByName(String iface) {
         try {
             NetworkInterface ni = NetworkInterface.getByName(iface);
