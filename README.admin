@@ -105,6 +105,10 @@ It also rejects a password identical to the user name, repeated patterns, and
 four-character alphabetic, numeric, or adjacent-keyboard sequences (for
 example, `1234`, `qwer`, and `asdf`).
 
+New passwords expire after 90 days (three months) by default. This applies when
+a user replaces an expired password; administrators can still select an exact
+expiration with `user password-reset --password-valid-to`.
+
 The optional checks can be selected by updating the corresponding row in the
 profile database's `settings` table:
 

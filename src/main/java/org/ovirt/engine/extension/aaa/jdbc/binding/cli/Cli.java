@@ -1342,7 +1342,15 @@ public class Cli {
                 Schema.UserKeys.PASSWORD_VALID_TO,
                 args.get("password-valid-to") != null ?
                     DateUtils.fromISO((String) args.get("password-valid-to")) :
-                    null
+                    password == null ? null : DateUtils.add(
+                        System.currentTimeMillis(),
+                        Calendar.DATE,
+                        context.get(Schema.InvokeKeys.SETTINGS_RESULT, ExtMap.class).get(
+                            Schema.Settings.PASSWORD_EXPIRATION_DAYS,
+                            Integer.class,
+                            Schema.Settings.DEFAULT_PASSWORD_EXPIRATION_DAYS
+                        )
+                    )
             )
             .mput(
                 Schema.UserKeys.FORCE_PASSWORD,
