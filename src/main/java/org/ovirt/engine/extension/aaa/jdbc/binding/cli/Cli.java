@@ -1326,7 +1326,7 @@ public class Cli {
                     password = System.getenv(passwords[1]);
                     break;
                 case "file":
-                    password = readFile(passwords[1]);
+                    password = readPasswordFile(passwords[1]);
                     break;
                 case "interactive":
                     password = readPasswordInteractively(context);
@@ -1409,7 +1409,7 @@ public class Cli {
      * basis wherever it is read, which is what {@code ExtensionUtils.loadPropertiesFromFile} does.
      * Nothing is lost by not consulting the configuration for a file that carries no header.</p>
      */
-    private static String readFile(String path) throws IOException {
+    static String readPasswordFile(String path) throws IOException {
         StringBuilder sb = new StringBuilder();
         // no newline between lines, as this has always done
         for (String line : Files.readAllLines(Paths.get(path), StandardCharsets.UTF_8)) {
