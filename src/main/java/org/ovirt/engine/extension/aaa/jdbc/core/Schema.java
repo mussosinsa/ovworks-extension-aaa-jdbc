@@ -174,6 +174,7 @@ public class Schema {
 
     /** Note: names of loaded keys are retrieved from the database. */
     public static class Settings {
+        public static final int DEFAULT_PASSWORD_EXPIRATION_DAYS = 90;
         public static final int DEFAULT_PASSWORD_HISTORY_DAYS = 90;
         public static final boolean DEFAULT_PASSWORD_POLICY_OPTION = true;
 
